@@ -213,6 +213,60 @@ gsutil cp gs://spicy-pickle-backups/backups/spicy-pickle-backup-YYYYMMDD_HHMMSS.
 gunzip < /tmp/spicy-pickle-backup-*.sql.gz | docker exec -i spicy-pickle-db psql -U spicypickle -d spicypickle
 ```
 
+## Cloud Pub/Sub Setup
+
+Pub/Sub provides reliable webhook processing with automatic retries and handles burst traffic (e.g., 600+ inventory changes from a bulk import).
+
+### 1. Create Topic and Subscription
+
+```bash
+# Create topic for inventory webhooks
+gcloud pubsub topics create spicy-pickle-inventory-webhooks
+
+# Create push subscription to Cloud Run
+gcloud pubsub subscriptions create spicy-pickle-inventory-sub \
+  --topic=spicy-pickle-inventory-webhooks \
+  --push-endpoint=https://YOUR_CLOUD_RUN_URL/webhooks/inventory/pubsub \
+  --ack-deadline=60 \
+  --min-retry-delay=10s \
+  --max-retry-delay=600s
+```
+
+### 2. Webhook Forwarder
+
+For production, deploy a lightweight Cloud Function to receive Shopify webhooks and publish to Pub/Sub:
+
+```javascript
+// Cloud Function to forward webhooks to Pub/Sub
+const { PubSub } = require("@google-cloud/pubsub");
+const pubsub = new PubSub();
+
+exports.forwardWebhook = async (req, res) => {
+  // Verify HMAC signature (important for security!)
+  // const hmac = req.headers["x-shopify-hmac-sha256"];
+  // ... verify signature ...
+
+  const shop = req.headers["x-shopify-shop-domain"];
+  const topic = req.headers["x-shopify-topic"];
+
+  await pubsub.topic("spicy-pickle-inventory-webhooks").publishMessage({
+    data: Buffer.from(JSON.stringify(req.body)),
+    attributes: {
+      shop,
+      topic,
+      api_version: req.headers["x-shopify-api-version"],
+      webhook_id: req.headers["x-shopify-webhook-id"],
+    },
+  });
+
+  res.status(200).send();
+};
+```
+
+### 3. Update Shopify Webhook URL
+
+Point your Shopify webhook to the Cloud Function URL instead of directly to Cloud Run.
+
 ## Migration to Cloud SQL
 
 When you outgrow the e2-micro, migrate to Cloud SQL:
