@@ -5,30 +5,104 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
+  // Use "postgresql" in production, "sqlite" for local development
+  // Set via DATABASE_PROVIDER env var, defaults to sqlite
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  url      = env("DATABASE_URL")
 }
 
+// ============================================================================
+// Shopify Session Storage (required by @shopify/shopify-app-session-storage-prisma)
+// ============================================================================
+
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+
+  @@index([shop])
+}
+
+// ============================================================================
+// Spicy Pickle Models
+// ============================================================================
+
+/// Represents a Shopify store using the app
+model Shop {
+  id           String        @id // shop domain (e.g., "my-store.myshopify.com")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  bundles      Bundle[]
+  binLocations BinLocation[]
+}
+
+/// A bundle configuration linking a parent variant to its child components
+/// Used for both same-product bundles (Single/4-Pack/24-Pack) and mixed bundles (variety packs)
+model Bundle {
+  id           String        @id @default(cuid())
+  shopId       String
+  shop         Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name         String        // User-friendly name for the bundle (e.g., "Lager 24-Pack")
+  parentGid    String        // Shopify Product Variant GID (e.g., "gid://shopify/ProductVariant/123")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  children     BundleChild[]
+  expandOnPick Boolean       @default(false) // If true, expand to components in pick list
+
+  @@unique([shopId, parentGid])
+  @@index([shopId])
+  @@index([parentGid])
+}
+
+/// A child component of a bundle with its quantity multiplier
+model BundleChild {
+  id       String @id @default(cuid())
+  bundleId String
+  bundle   Bundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  childGid String // Shopify Product Variant GID
+  quantity Int    // Number of this variant in the bundle (e.g., 24 for a 24-pack)
+
+  @@unique([bundleId, childGid])
+  @@index([childGid])
+}
+
+/// Bin/location mapping for warehouse picking
+model BinLocation {
+  id         String   @id @default(cuid())
+  shopId     String
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantGid String   // Shopify Product Variant GID
+  location   String   // Free-form bin location string (e.g., "A1-03", "Cold Room Shelf 2")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([shopId, variantGid])
+  @@index([shopId])
+}
+
+/// Sync lock for idempotency during inventory webhook processing
+/// Prevents duplicate processing and infinite loops from our own inventory updates
+model SyncLock {
+  id        String   @id // Unique identifier (webhook ID or generated sync ID)
+  bundleId  String   // The bundle being synced
+  createdAt DateTime @default(now())
+  expiresAt DateTime // TTL for automatic cleanup
+
+  @@index([bundleId])
+  @@index([expiresAt])
 }

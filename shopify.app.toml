@@ -20,9 +20,18 @@ api_version = "2026-04"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  # Inventory webhook for bundle sync
+  [[webhooks.subscriptions]]
+  topics = [ "inventory_levels/update" ]
+  uri = "/webhooks/inventory"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+# Required scopes for Spicy Pickle:
+# - Products: Read/write for bundle configuration and metafields
+# - Inventory: Read/write for bundle inventory sync
+# - Orders: Read for pick list generation
+scopes = "read_products,write_products,read_inventory,write_inventory,read_orders"
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]

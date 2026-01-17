@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spicy-pickle-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-spicypickle}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-spicypickle}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Only expose on localhost for security; Cloud Run connects via VPC
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spicypickle} -d ${POSTGRES_DB:-spicypickle}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Resource limits for e2-micro (1GB RAM)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+volumes:
+  postgres_data:
+    driver: local
