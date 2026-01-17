@@ -78,9 +78,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const variantResponseJson = await variantResponse.json();
 
   return {
-    product: responseJson!.data!.productCreate!.product,
+    product: responseJson.data!.productCreate!.product,
     variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
+      variantResponseJson.data!.productVariantsBulkUpdate!.productVariants,
   };
 };
 
@@ -149,7 +149,7 @@ export default function Index() {
           {fetcher.data?.product && (
             <s-button
               onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
+                void shopify.intents.invoke?.("edit:shopify/Product", {
                   value: fetcher.data?.product?.id,
                 });
               }}

@@ -58,6 +58,10 @@ module.exports = {
       files: ["**/*.{ts,tsx}"],
       plugins: ["@typescript-eslint", "import"],
       parser: "@typescript-eslint/parser",
+      parserOptions: {
+        project: "./tsconfig.json",
+        tsconfigRootDir: __dirname,
+      },
       settings: {
         "import/internal-regex": "^~/",
         "import/resolver": {
@@ -71,9 +75,27 @@ module.exports = {
       },
       extends: [
         "plugin:@typescript-eslint/recommended",
+        "plugin:@typescript-eslint/recommended-requiring-type-checking",
         "plugin:import/recommended",
         "plugin:import/typescript",
       ],
+      rules: {
+        "@typescript-eslint/no-floating-promises": "error",
+        "@typescript-eslint/no-misused-promises": ["error", {
+          checksVoidReturn: {
+            attributes: false, // Allow async handlers in JSX props
+          },
+        }],
+        "@typescript-eslint/await-thenable": "error",
+        "@typescript-eslint/no-unnecessary-type-assertion": "warn",
+        "@typescript-eslint/require-await": "warn", // Warn instead of error for async without await
+        // Temporarily relaxed for Shopify GraphQL responses - enable when proper types are generated
+        "@typescript-eslint/no-unsafe-assignment": "off",
+        "@typescript-eslint/no-unsafe-member-access": "off",
+        "@typescript-eslint/no-unsafe-call": "off",
+        "@typescript-eslint/no-unsafe-return": "off",
+        "@typescript-eslint/no-unsafe-argument": "off",
+      },
     },
 
     // Node
