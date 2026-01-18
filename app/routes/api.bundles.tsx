@@ -15,8 +15,9 @@ import db from "../db.server";
 import { syncBundleMetafield } from "../services/metafields.server";
 
 interface CreateBundleRequest {
-  name: string;
   parentGid: string;
+  parentTitle?: string;
+  parentSku?: string;
   expandOnPick?: boolean;
   children: Array<{
     childGid: string;
@@ -48,8 +49,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return Response.json({
     bundles: bundles.map((bundle) => ({
       id: bundle.id,
-      name: bundle.name,
       parentGid: bundle.parentGid,
+      parentTitle: bundle.parentTitle,
+      parentSku: bundle.parentSku,
       expandOnPick: bundle.expandOnPick,
       createdAt: bundle.createdAt.toISOString(),
       updatedAt: bundle.updatedAt.toISOString(),
@@ -81,10 +83,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   // Validate required fields
-  if (!body.name || typeof body.name !== "string") {
-    return Response.json({ error: "name is required" }, { status: 400 });
-  }
-
   if (!body.parentGid || typeof body.parentGid !== "string") {
     return Response.json({ error: "parentGid is required" }, { status: 400 });
   }
@@ -140,8 +138,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const bundle = await db.bundle.create({
     data: {
       shopId: shop,
-      name: body.name,
       parentGid: body.parentGid,
+      parentTitle: body.parentTitle || null,
+      parentSku: body.parentSku || null,
       expandOnPick: body.expandOnPick ?? false,
       children: {
         create: body.children.map((child) => ({
@@ -166,8 +165,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     {
       bundle: {
         id: bundle.id,
-        name: bundle.name,
         parentGid: bundle.parentGid,
+        parentTitle: bundle.parentTitle,
+        parentSku: bundle.parentSku,
         expandOnPick: bundle.expandOnPick,
         createdAt: bundle.createdAt.toISOString(),
         updatedAt: bundle.updatedAt.toISOString(),

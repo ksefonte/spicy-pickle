@@ -49,6 +49,7 @@ model Shop {
   updatedAt    DateTime      @updatedAt
   bundles      Bundle[]
   binLocations BinLocation[]
+  supplierSkus SupplierSku[]
 }
 
 /// A bundle configuration linking a parent variant to its child components
@@ -57,8 +58,9 @@ model Bundle {
   id           String        @id @default(cuid())
   shopId       String
   shop         Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  name         String        // User-friendly name for the bundle (e.g., "Lager 24-Pack")
   parentGid    String        // Shopify Product Variant GID (e.g., "gid://shopify/ProductVariant/123")
+  parentTitle  String?       // Cached title from Shopify (e.g., "Hāpi Daze - 24 Pack")
+  parentSku    String?       // Cached SKU from Shopify
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   children     BundleChild[]
@@ -105,4 +107,20 @@ model SyncLock {
 
   @@index([bundleId])
   @@index([expiresAt])
+}
+
+/// Supplier SKU mapping for inventory cost tracking
+/// Maps Shopify variants to supplier SKUs with quantity ratios
+model SupplierSku {
+  id              String   @id @default(cuid())
+  shopId          String
+  shop            Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantGid      String   // Shopify Product Variant GID
+  supplierSku     String   // The supplier's SKU code (e.g., "HD 4X6")
+  supplierSkuQty  Float    // How many of this variant per supplier SKU (e.g., 0.25 means 4 of this variant = 1 supplier SKU)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([shopId, variantGid])
+  @@index([shopId])
 }

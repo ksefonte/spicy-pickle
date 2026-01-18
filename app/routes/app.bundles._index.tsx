@@ -13,8 +13,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+interface VariantInfo {
+  title: string;
+  sku: string;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const url = new URL(request.url);
@@ -27,28 +32,106 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     update: {},
   });
 
-  // Fetch bundles with child count
+  // Fetch bundles with children
   const bundles = await db.bundle.findMany({
     where: {
       shopId: shop,
       ...(search
         ? {
             OR: [
-              { name: { contains: search } },
+              { parentTitle: { contains: search } },
+              { parentSku: { contains: search } },
               { parentGid: { contains: search } },
             ],
           }
         : {}),
     },
     include: {
-      _count: {
-        select: { children: true },
-      },
+      children: true,
     },
     orderBy: { updatedAt: "desc" },
   });
 
-  return { bundles, shop, search };
+  // Collect all variant GIDs that need titles fetched
+  const allGids = new Set<string>();
+  for (const bundle of bundles) {
+    if (!bundle.parentTitle) {
+      allGids.add(bundle.parentGid);
+    }
+    for (const child of bundle.children) {
+      allGids.add(child.childGid);
+    }
+  }
+
+  // Fetch variant info from Shopify if needed
+  const variantInfoMap = new Map<string, VariantInfo>();
+  if (allGids.size > 0) {
+    const gidsArray = Array.from(allGids);
+    try {
+      interface VariantNode {
+        id: string;
+        title: string;
+        sku: string;
+        product: { title: string };
+      }
+      interface NodesResponse {
+        nodes: Array<VariantNode | null>;
+      }
+
+      const response = await admin.graphql(
+        `#graphql
+        query GetVariantTitles($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              title
+              sku
+              product {
+                title
+              }
+            }
+          }
+        }`,
+        { variables: { ids: gidsArray } },
+      );
+
+      const data: NodesResponse = (await response.json()).data;
+      for (const node of data.nodes) {
+        if (node) {
+          const displayTitle =
+            node.title === "Default Title"
+              ? node.product.title
+              : `${node.product.title} - ${node.title}`;
+          variantInfoMap.set(node.id, {
+            title: displayTitle,
+            sku: node.sku || "",
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch variant titles:", error);
+    }
+  }
+
+  // Build enriched bundles with variant info
+  const enrichedBundles = bundles.map((bundle) => {
+    const parentInfo = variantInfoMap.get(bundle.parentGid);
+    return {
+      ...bundle,
+      parentTitle: bundle.parentTitle || parentInfo?.title || bundle.parentGid,
+      parentSku: bundle.parentSku || parentInfo?.sku || "",
+      children: bundle.children.map((child) => {
+        const childInfo = variantInfoMap.get(child.childGid);
+        return {
+          ...child,
+          childTitle: childInfo?.title || child.childGid,
+          childSku: childInfo?.sku || "",
+        };
+      }),
+    };
+  });
+
+  return { bundles: enrichedBundles, shop, search };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -69,6 +152,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     return { deleted: true };
+  }
+
+  if (intent === "updateQuantity") {
+    const childId = formData.get("childId") as string;
+    const quantity = parseInt(formData.get("quantity") as string, 10);
+
+    if (isNaN(quantity) || quantity < 1) {
+      return { error: "Invalid quantity" };
+    }
+
+    await db.bundleChild.update({
+      where: { id: childId },
+      data: { quantity },
+    });
+
+    return { updated: true };
   }
 
   return { error: "Unknown action" };
@@ -97,6 +196,61 @@ export default function BundlesIndex() {
     }
   };
 
+  const handleQuantityChange = (childId: string, quantity: number) => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "updateQuantity", childId, quantity: quantity.toString() },
+      { method: "POST" },
+    );
+  };
+
+  // Flatten bundles into table rows (one row per child)
+  const tableRows: Array<{
+    bundleId: string;
+    parentTitle: string;
+    parentSku: string;
+    childId: string;
+    childTitle: string;
+    childSku: string;
+    quantity: number;
+    expandOnPick: boolean;
+    isFirstChild: boolean;
+    childCount: number;
+  }> = [];
+
+  for (const bundle of bundles) {
+    if (bundle.children.length === 0) {
+      // Bundle with no children - show as single row
+      tableRows.push({
+        bundleId: bundle.id,
+        parentTitle: bundle.parentTitle,
+        parentSku: bundle.parentSku,
+        childId: "",
+        childTitle: "(no children)",
+        childSku: "",
+        quantity: 0,
+        expandOnPick: bundle.expandOnPick,
+        isFirstChild: true,
+        childCount: 0,
+      });
+    } else {
+      bundle.children.forEach((child, index) => {
+        tableRows.push({
+          bundleId: bundle.id,
+          parentTitle: bundle.parentTitle,
+          parentSku: bundle.parentSku,
+          childId: child.id,
+          childTitle: child.childTitle,
+          childSku: child.childSku,
+          quantity: child.quantity,
+          expandOnPick: bundle.expandOnPick,
+          isFirstChild: index === 0,
+          childCount: bundle.children.length,
+        });
+      });
+    }
+  }
+
   return (
     <s-page heading="Bundle Configuration">
       <s-button
@@ -108,15 +262,39 @@ export default function BundlesIndex() {
 
       <s-section heading="Your Bundles">
         <s-stack direction="block" gap="base">
-          <s-text-field
-            label="Search bundles"
-            value={search}
-            placeholder="Search by name or variant GID..."
-            onInput={(e: Event) => {
-              const target = e.target as HTMLInputElement;
-              handleSearch(target.value);
-            }}
-          />
+          <s-stack direction="inline" gap="base">
+            <div style={{ flex: 1, minWidth: "200px" }}>
+              <s-text-field
+                label="Search bundles"
+                value={search}
+                placeholder="Search by name, SKU, or GID..."
+                onInput={(e: Event) => {
+                  const target = e.target as HTMLInputElement;
+                  handleSearch(target.value);
+                }}
+              />
+            </div>
+            <s-stack direction="inline" gap="small">
+              <s-button
+                variant="secondary"
+                onClick={() => navigate("/app/bundles/quick-setup")}
+              >
+                Quick Setup
+              </s-button>
+              <s-button
+                variant="secondary"
+                onClick={() => navigate("/app/bundles/import")}
+              >
+                Import
+              </s-button>
+              <s-button
+                variant="secondary"
+                onClick={() => navigate("/app/bundles/export")}
+              >
+                Export
+              </s-button>
+            </s-stack>
+          </s-stack>
 
           {bundles.length === 0 ? (
             <s-box padding="large" borderRadius="base" background="subdued">
@@ -126,88 +304,167 @@ export default function BundlesIndex() {
                   Create your first bundle to start syncing inventory across
                   product variants.
                 </s-paragraph>
-                <s-button onClick={() => navigate("/app/bundles/new")}>
-                  Create your first bundle
-                </s-button>
+                <s-stack direction="inline" gap="base">
+                  <s-button
+                    onClick={() => navigate("/app/bundles/quick-setup")}
+                  >
+                    Quick Setup (recommended)
+                  </s-button>
+                  <s-button
+                    variant="secondary"
+                    onClick={() => navigate("/app/bundles/new")}
+                  >
+                    Manual Setup
+                  </s-button>
+                </s-stack>
               </s-stack>
             </s-box>
           ) : (
-            <s-stack direction="block" gap="small">
-              {bundles.map((bundle) => (
-                <s-box
-                  key={bundle.id}
-                  padding="base"
-                  borderWidth="base"
-                  borderRadius="base"
-                >
-                  <s-stack direction="block" gap="small">
-                    <s-stack
-                      direction="inline"
-                      gap="base"
-                      justifyContent="space-between"
+            <div style={{ overflowX: "auto" }}>
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: "14px",
+                }}
+              >
+                <thead>
+                  <tr
+                    style={{
+                      borderBottom: "2px solid var(--p-color-border)",
+                      textAlign: "left",
+                    }}
+                  >
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Parent Name
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Parent SKU
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Child Name
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Child Qty
+                    </th>
+                    <th
+                      style={{
+                        padding: "12px 8px",
+                        fontWeight: 600,
+                        textAlign: "right",
+                      }}
                     >
-                      <s-heading>{bundle.name}</s-heading>
-                      <s-stack direction="inline" gap="small">
-                        <s-button
-                          variant="secondary"
-                          onClick={() => navigate(`/app/bundles/${bundle.id}`)}
-                        >
-                          Edit
-                        </s-button>
-                        <s-button
-                          variant="secondary"
-                          tone="critical"
-                          onClick={() => handleDelete(bundle.id, bundle.name)}
-                        >
-                          Delete
-                        </s-button>
-                      </s-stack>
-                    </s-stack>
-                    <s-paragraph>
-                      {bundle._count.children} component
-                      {bundle._count.children !== 1 ? "s" : ""} •{" "}
-                      {bundle.expandOnPick
-                        ? "Expands on pick"
-                        : "Picks as bundle"}
-                    </s-paragraph>
-                    <s-text tone="neutral">{bundle.parentGid}</s-text>
-                  </s-stack>
-                </s-box>
-              ))}
-            </s-stack>
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tableRows.map((row, index) => (
+                    <tr
+                      key={`${row.bundleId}-${row.childId || index}`}
+                      style={{
+                        borderBottom: "1px solid var(--p-color-border-subdued)",
+                        backgroundColor: row.isFirstChild
+                          ? "transparent"
+                          : "var(--p-color-bg-surface-secondary)",
+                      }}
+                    >
+                      <td style={{ padding: "10px 8px" }}>
+                        {row.isFirstChild ? (
+                          <s-text type="strong">{row.parentTitle}</s-text>
+                        ) : null}
+                      </td>
+                      <td style={{ padding: "10px 8px" }}>
+                        {row.isFirstChild ? (
+                          <s-text tone="neutral">{row.parentSku || "—"}</s-text>
+                        ) : null}
+                      </td>
+                      <td style={{ padding: "10px 8px" }}>
+                        <s-text>{row.childTitle}</s-text>
+                      </td>
+                      <td style={{ padding: "10px 8px", width: "100px" }}>
+                        {row.childId ? (
+                          <input
+                            type="number"
+                            min={1}
+                            value={row.quantity}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value, 10);
+                              if (!isNaN(val) && val >= 1) {
+                                handleQuantityChange(row.childId, val);
+                              }
+                            }}
+                            style={{
+                              width: "70px",
+                              padding: "6px 8px",
+                              border: "1px solid var(--p-color-border)",
+                              borderRadius: "4px",
+                              fontSize: "14px",
+                            }}
+                          />
+                        ) : (
+                          <s-text tone="neutral">—</s-text>
+                        )}
+                      </td>
+                      <td
+                        style={{
+                          padding: "10px 8px",
+                          textAlign: "right",
+                        }}
+                      >
+                        {row.isFirstChild ? (
+                          <s-stack direction="inline" gap="small">
+                            <s-button
+                              variant="tertiary"
+                              onClick={() =>
+                                navigate(`/app/bundles/${row.bundleId}`)
+                              }
+                            >
+                              Edit
+                            </s-button>
+                            <s-button
+                              variant="tertiary"
+                              tone="critical"
+                              onClick={() =>
+                                handleDelete(row.bundleId, row.parentTitle)
+                              }
+                            >
+                              Delete
+                            </s-button>
+                          </s-stack>
+                        ) : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
-        </s-stack>
-      </s-section>
 
-      <s-section slot="aside" heading="Import / Export">
-        <s-stack direction="block" gap="base">
-          <s-paragraph>Bulk manage bundles via CSV files.</s-paragraph>
-          <s-button
-            variant="secondary"
-            onClick={() => navigate("/app/bundles/import")}
-          >
-            Import CSV
-          </s-button>
-          <s-button
-            variant="secondary"
-            onClick={() => navigate("/app/bundles/export")}
-          >
-            Export CSV
-          </s-button>
+          <s-text tone="neutral">
+            {bundles.length} bundle{bundles.length !== 1 ? "s" : ""} configured
+          </s-text>
         </s-stack>
       </s-section>
 
       <s-section slot="aside" heading="About Bundles">
-        <s-paragraph>
-          Bundles link a parent product variant to one or more child variants.
-          When inventory changes on any linked variant, all related variants are
-          automatically updated.
-        </s-paragraph>
-        <s-paragraph>
-          <s-text type="strong">Example:</s-text> A 24-Pack variant with
-          quantity 24 linked to a Single variant means 48 singles = 2 available
-          24-packs.
-        </s-paragraph>
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Bundles link a parent product variant to one or more child variants.
+            When inventory changes on any linked variant, all related variants
+            are automatically updated.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Example:</s-text> A 24-Pack variant with
+            quantity 24 linked to a Single variant means 48 singles = 2
+            available 24-packs.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Quick Setup</s-text> automatically creates
+            bundles for all variants of a single product (e.g., Single, 4-Pack,
+            6-Pack, 24-Pack).
+          </s-paragraph>
+        </s-stack>
       </s-section>
     </s-page>
   );

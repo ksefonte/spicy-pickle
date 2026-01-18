@@ -2,13 +2,14 @@
 
 ## Google Cloud Project
 
-| Property | Value |
-|----------|-------|
-| Project ID | `spicy-pickle-484622` |
-| Project Number | `990586804218` |
-| Region | `australia-southeast1` (Sydney) |
+| Property       | Value                           |
+| -------------- | ------------------------------- |
+| Project ID     | `spicy-pickle-484622`           |
+| Project Number | `990586804218`                  |
+| Region         | `australia-southeast1` (Sydney) |
 
 **Region rationale**: Shopify stores data globally (not localized to Oceania), so webhook latency from Shopify is similar regardless of hosting location. Sydney hosting optimizes for:
+
 - Staff using the app UI (pick lists, bundle config) from NZ/AU
 - App → Shopify API call latency for inventory updates
 - Data residency closer to your business operations
@@ -34,14 +35,14 @@ flowchart TB
         AdminAPI[Admin GraphQL API]
         Metafields[Product Metafields]
     end
-    
+
     subgraph GCP [Google Cloud]
         PubSub[Cloud Pub/Sub]
         CloudRun[Cloud Run - App]
         GCE[GCE e2-micro - Postgres]
         GCS[Cloud Storage - Backups]
     end
-    
+
     subgraph App [Spicy Pickle App]
         ReactRouter[React Router Frontend]
         API[API Routes]
@@ -49,7 +50,7 @@ flowchart TB
         PickListService[Pick List Service]
         Prisma[Prisma ORM]
     end
-    
+
     Webhook --> PubSub
     PubSub --> CloudRun
     CloudRun --> InventoryService
@@ -71,13 +72,14 @@ flowchart TB
 
 **Cost: ~$1.70/month** (10GB SSD disk only; e2-micro VM is free tier)
 
-| Component | Specification | Cost |
-|-----------|---------------|------|
-| VM | e2-micro (0.25 vCPU, 1GB RAM) | Free (1 per billing account) |
-| Disk | 10GB SSD persistent | ~$1.70/mo |
-| Backups | Cloud Storage (pg_dump) | ~$0.02/GB/mo |
+| Component | Specification                 | Cost                         |
+| --------- | ----------------------------- | ---------------------------- |
+| VM        | e2-micro (0.25 vCPU, 1GB RAM) | Free (1 per billing account) |
+| Disk      | 10GB SSD persistent           | ~$1.70/mo                    |
+| Backups   | Cloud Storage (pg_dump)       | ~$0.02/GB/mo                 |
 
 **Setup:**
+
 - Docker Compose with official `postgres:16-alpine` image
 - Persistent volume mounted to `/var/lib/postgresql/data`
 - Private IP within VPC for Cloud Run access
@@ -150,7 +152,7 @@ model Bundle {
   updatedAt    DateTime      @updatedAt
   children     BundleChild[]
   expandOnPick Boolean       @default(false)
-  
+
   @@unique([shopId, parentGid])
   @@index([shopId])
 }
@@ -161,7 +163,7 @@ model BundleChild {
   bundle   Bundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
   childGid String // Shopify Product Variant GID
   quantity Int    // Multiplier (e.g., 24 for 24-pack)
-  
+
   @@unique([bundleId, childGid])
 }
 
@@ -171,7 +173,7 @@ model BinLocation {
   shop       Shop   @relation(fields: [shopId], references: [id])
   variantGid String // Shopify Product Variant GID
   location   String // Free-form bin location string
-  
+
   @@unique([shopId, variantGid])
   @@index([shopId])
 }
@@ -182,7 +184,7 @@ model SyncLock {
   bundleId   String
   createdAt  DateTime @default(now())
   expiresAt  DateTime // Auto-cleanup after TTL
-  
+
   @@index([bundleId])
   @@index([expiresAt])
 }
@@ -257,13 +259,8 @@ Add to `package.json`:
 ```json
 {
   "lint-staged": {
-    "*.{ts,tsx}": [
-      "eslint --fix",
-      "prettier --write"
-    ],
-    "*.{json,md,css}": [
-      "prettier --write"
-    ]
+    "*.{ts,tsx}": ["eslint --fix", "prettier --write"],
+    "*.{json,md,css}": ["prettier --write"]
   }
 }
 ```
@@ -343,43 +340,48 @@ jobs:
 
 ### 0.7 Key Test Files to Create
 
-| File | Purpose |
-|------|---------|
-| `app/services/inventory-sync.server.test.ts` | Unit tests for sync algorithm |
-| `app/services/picklist.server.test.ts` | Unit tests for pick list generation |
-| `tests/integration/bundle-crud.test.ts` | Integration tests for bundle CRUD |
+| File                                         | Purpose                             |
+| -------------------------------------------- | ----------------------------------- |
+| `app/services/inventory-sync.server.test.ts` | Unit tests for sync algorithm       |
+| `app/services/picklist.server.test.ts`       | Unit tests for pick list generation |
+| `tests/integration/bundle-crud.test.ts`      | Integration tests for bundle CRUD   |
 
 ### 0.8 Scripts Summary
 
-| Script | When to Run | Purpose |
-|--------|-------------|---------|
-| `npm run lint` | Pre-commit (auto) | ESLint with type checking |
-| `npm run typecheck` | Pre-push (auto) | Full TypeScript validation |
-| `npm run test` | Pre-push (auto) | Run all tests |
-| `npm run test:watch` | During development | Watch mode for TDD |
-| `npm run test:coverage` | Before release | Verify coverage targets |
+| Script                  | When to Run        | Purpose                    |
+| ----------------------- | ------------------ | -------------------------- |
+| `npm run lint`          | Pre-commit (auto)  | ESLint with type checking  |
+| `npm run typecheck`     | Pre-push (auto)    | Full TypeScript validation |
+| `npm run test`          | Pre-push (auto)    | Run all tests              |
+| `npm run test:watch`    | During development | Watch mode for TDD         |
+| `npm run test:coverage` | Before release     | Verify coverage targets    |
 
 ---
 
 ## Phase 1: Core Infrastructure
 
 ### 1.1 GCE Postgres Setup
+
 - Create `infrastructure/docker-compose.yml` for Postgres container
 - Create `infrastructure/backup.sh` script for pg_dump to Cloud Storage
 - Document GCE VM setup in `infrastructure/README.md`
 
 ### 1.2 Database Migration
+
 - Update `prisma/schema.prisma` to use PostgreSQL
 - Add Shop, Bundle, BundleChild, BinLocation, SyncLock models
 - Create migration scripts
 
 ### 1.3 Shopify App Configuration
+
 Update `shopify.app.toml` with required scopes:
+
 - `read_products`, `write_products`
-- `read_inventory`, `write_inventory`  
+- `read_inventory`, `write_inventory`
 - `read_orders`
 
 ### 1.4 Webhook Infrastructure
+
 - Add `INVENTORY_LEVELS/UPDATE` webhook subscription
 - Create webhook handler route at `app/routes/webhooks.inventory.tsx`
 - Set up Google Cloud Pub/Sub topic and push subscription
@@ -389,22 +391,25 @@ Update `shopify.app.toml` with required scopes:
 ## Phase 2: Bundle Configuration UI
 
 ### 2.1 Bundle Management Pages
-| Route | Purpose |
-|-------|---------|
+
+| Route                               | Purpose                             |
+| ----------------------------------- | ----------------------------------- |
 | `app/routes/app.bundles._index.tsx` | List all bundles with search/filter |
-| `app/routes/app.bundles.new.tsx` | Create new bundle |
-| `app/routes/app.bundles.$id.tsx` | Edit existing bundle |
+| `app/routes/app.bundles.new.tsx`    | Create new bundle                   |
+| `app/routes/app.bundles.$id.tsx`    | Edit existing bundle                |
 
 ### 2.2 Bundle Configuration Components
+
 - Product/Variant picker using Shopify Resource Picker
 - Child variant list with quantity inputs
 - "Expand on pick" toggle per bundle
 - Delete bundle functionality
 
 ### 2.3 CSV Import/Export
-| Route | Purpose |
-|-------|---------|
-| `app/routes/app.bundles.import.tsx` | CSV upload for bulk bundle creation |
+
+| Route                               | Purpose                               |
+| ----------------------------------- | ------------------------------------- |
+| `app/routes/app.bundles.import.tsx` | CSV upload for bulk bundle creation   |
 | `app/routes/app.bundles.export.tsx` | CSV download of current configuration |
 
 CSV format: `parent_gid,child_gid,quantity,expand_on_pick`
@@ -432,12 +437,14 @@ Create `app/services/inventory-sync.server.ts`:
 ### 3.2 Idempotency and Loop Prevention
 
 Using the `SyncLock` table:
+
 - Before processing, check if lock exists for this webhook event ID
 - If lock exists and not expired, skip (already processed)
 - If no lock, create lock with TTL, process, then delete
 - Prevents infinite loops from our own inventory updates
 
 ### 3.3 Pub/Sub Integration
+
 - Configure push subscription to `/webhooks/inventory/pubsub`
 - Implement acknowledgment and retry logic
 - Add exponential backoff for failed syncs
@@ -447,9 +454,10 @@ Using the `SyncLock` table:
 ## Phase 4: Pick List Generator
 
 ### 4.1 Bin Location Management
-| Route | Purpose |
-|-------|---------|
-| `app/routes/app.locations._index.tsx` | List/edit bin locations |
+
+| Route                                 | Purpose                      |
+| ------------------------------------- | ---------------------------- |
+| `app/routes/app.locations._index.tsx` | List/edit bin locations      |
 | `app/routes/app.locations.import.tsx` | CSV import for bin locations |
 
 CSV format: `variant_gid,variant_sku,bin_location`
@@ -457,6 +465,7 @@ CSV format: `variant_gid,variant_sku,bin_location`
 ### 4.2 Pick List Generation UI
 
 Create `app/routes/app.picklist._index.tsx`:
+
 - Date range filter for orders
 - Order status filter (unfulfilled, partially fulfilled)
 - Manual order selection option
@@ -479,6 +488,7 @@ Create `app/services/picklist.server.ts`:
 ```
 
 ### 4.4 Pick List Output
+
 - Table view with columns: Product | Variant | Quantity | Bin Location
 - Sort options: by bin location (default), by product, by quantity
 - Print-friendly CSS view
@@ -489,13 +499,17 @@ Create `app/services/picklist.server.ts`:
 ## Phase 5: API and Metafield Integration
 
 ### 5.1 Metafield Storage
+
 Store bundle configuration in product metafields for external automation access:
+
 - Namespace: `spicy_pickle`
 - Key: `bundle_config` (JSON with children and quantities)
 - Key: `bin_location` (string)
 
 ### 5.2 Future REST API Endpoints
+
 For external integrations:
+
 - `GET /api/bundles` - List bundles
 - `POST /api/bundles` - Create bundle
 - `PUT /api/bundles/:id` - Update bundle
@@ -505,53 +519,53 @@ For external integrations:
 
 ## Key Files to Create/Modify
 
-| File | Purpose |
-|------|---------|
-| `tsconfig.json` | Add strict type checking options |
-| `.eslintrc.cjs` | Add type-aware linting rules |
-| `.husky/pre-commit` | Run lint-staged on commit |
-| `.husky/pre-push` | Run typecheck and tests on push |
-| `vitest.config.ts` | Test framework configuration |
-| `prisma/schema.prisma` | Add Shop, Bundle, BundleChild, BinLocation, SyncLock models |
-| `shopify.app.toml` | Add inventory/order scopes and webhooks |
-| `infrastructure/docker-compose.yml` | Postgres container config |
-| `infrastructure/backup.sh` | Database backup script |
-| `app/services/inventory-sync.server.ts` | Core inventory sync logic |
-| `app/services/inventory-sync.server.test.ts` | Unit tests for sync algorithm |
-| `app/services/picklist.server.ts` | Pick list generation logic |
-| `app/services/picklist.server.test.ts` | Unit tests for pick list |
-| `app/routes/app.bundles._index.tsx` | Bundle list page |
-| `app/routes/app.bundles.new.tsx` | Create bundle page |
-| `app/routes/app.bundles.$id.tsx` | Edit bundle page |
-| `app/routes/app.locations._index.tsx` | Bin locations page |
-| `app/routes/app.picklist._index.tsx` | Pick list generator page |
-| `app/routes/webhooks.inventory.tsx` | Inventory webhook handler |
+| File                                         | Purpose                                                     |
+| -------------------------------------------- | ----------------------------------------------------------- |
+| `tsconfig.json`                              | Add strict type checking options                            |
+| `.eslintrc.cjs`                              | Add type-aware linting rules                                |
+| `.husky/pre-commit`                          | Run lint-staged on commit                                   |
+| `.husky/pre-push`                            | Run typecheck and tests on push                             |
+| `vitest.config.ts`                           | Test framework configuration                                |
+| `prisma/schema.prisma`                       | Add Shop, Bundle, BundleChild, BinLocation, SyncLock models |
+| `shopify.app.toml`                           | Add inventory/order scopes and webhooks                     |
+| `infrastructure/docker-compose.yml`          | Postgres container config                                   |
+| `infrastructure/backup.sh`                   | Database backup script                                      |
+| `app/services/inventory-sync.server.ts`      | Core inventory sync logic                                   |
+| `app/services/inventory-sync.server.test.ts` | Unit tests for sync algorithm                               |
+| `app/services/picklist.server.ts`            | Pick list generation logic                                  |
+| `app/services/picklist.server.test.ts`       | Unit tests for pick list                                    |
+| `app/routes/app.bundles._index.tsx`          | Bundle list page                                            |
+| `app/routes/app.bundles.new.tsx`             | Create bundle page                                          |
+| `app/routes/app.bundles.$id.tsx`             | Edit bundle page                                            |
+| `app/routes/app.locations._index.tsx`        | Bin locations page                                          |
+| `app/routes/app.picklist._index.tsx`         | Pick list generator page                                    |
+| `app/routes/webhooks.inventory.tsx`          | Inventory webhook handler                                   |
 
 ---
 
 ## Tech Stack Summary
 
-| Layer | Technology |
-|-------|------------|
+| Layer    | Technology                                         |
+| -------- | -------------------------------------------------- |
 | Frontend | React Router v7, Shopify Polaris, App Bridge React |
-| Backend | React Router server routes, Prisma ORM |
-| Database | PostgreSQL 16 (self-hosted on GCE e2-micro) |
-| Queue | Google Cloud Pub/Sub |
-| Hosting | Google Cloud Run |
-| API | Shopify Admin GraphQL API (2026-04) |
+| Backend  | React Router server routes, Prisma ORM             |
+| Database | PostgreSQL 16 (self-hosted on GCE e2-micro)        |
+| Queue    | Google Cloud Pub/Sub                               |
+| Hosting  | Google Cloud Run                                   |
+| API      | Shopify Admin GraphQL API (2026-04)                |
 
 ---
 
 ## Estimated Monthly Costs
 
-| Service | Cost |
-|---------|------|
-| GCE e2-micro VM | Free (free tier) |
-| 10GB SSD Persistent Disk | ~$1.70 |
-| Cloud Storage (backups) | ~$0.05 |
-| Cloud Run | ~$0-5 (scales to zero) |
-| Cloud Pub/Sub | ~$0-1 (low volume) |
-| **Total** | **~$2-8/month** |
+| Service                  | Cost                   |
+| ------------------------ | ---------------------- |
+| GCE e2-micro VM          | Free (free tier)       |
+| 10GB SSD Persistent Disk | ~$1.70                 |
+| Cloud Storage (backups)  | ~$0.05                 |
+| Cloud Run                | ~$0-5 (scales to zero) |
+| Cloud Pub/Sub            | ~$0-1 (low volume)     |
+| **Total**                | **~$2-8/month**        |
 
 ---
 

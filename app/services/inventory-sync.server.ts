@@ -31,8 +31,8 @@ export interface InventoryUpdateEvent {
 export interface BundleWithChildren {
   id: string;
   shopId: string;
-  name: string;
   parentGid: string;
+  parentTitle?: string | null;
   children: Array<{
     id: string;
     childGid: string;
@@ -429,7 +429,7 @@ export async function processInventoryUpdate(
 
       // Log the adjustments for debugging
       console.log(
-        `[Sync] Bundle ${bundle.name} (${bundle.id}): ${adjustments.length} adjustments`,
+        `[Sync] Bundle ${bundle.parentTitle || bundle.parentGid} (${bundle.id}): ${adjustments.length} adjustments`,
       );
       for (const adj of adjustments) {
         console.log(`[Sync]   → ${adj.inventoryItemId}: delta=${adj.delta}`);

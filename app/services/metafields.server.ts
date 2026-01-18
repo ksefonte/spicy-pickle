@@ -54,15 +54,15 @@ export async function syncBundleMetafield(
   admin: AdminApiContext,
   bundle: {
     id: string;
-    name: string;
     parentGid: string;
+    parentTitle?: string | null;
     expandOnPick: boolean;
     children: Array<{ childGid: string; quantity: number }>;
   },
 ): Promise<void> {
   const config: BundleConfig = {
     bundleId: bundle.id,
-    bundleName: bundle.name,
+    bundleName: bundle.parentTitle || bundle.parentGid,
     expandOnPick: bundle.expandOnPick,
     children: bundle.children.map((c) => ({
       variantGid: c.childGid,
@@ -126,8 +126,8 @@ export async function syncAllBundleMetafields(
   admin: AdminApiContext,
   bundles: Array<{
     id: string;
-    name: string;
     parentGid: string;
+    parentTitle?: string | null;
     expandOnPick: boolean;
     children: Array<{ childGid: string; quantity: number }>;
   }>,

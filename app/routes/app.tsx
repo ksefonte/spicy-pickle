@@ -21,6 +21,7 @@ export default function App() {
         <s-link href="/app">Home</s-link>
         <s-link href="/app/bundles">Bundles</s-link>
         <s-link href="/app/locations">Bin Locations</s-link>
+        <s-link href="/app/supplier-skus">Supplier SKUs</s-link>
         <s-link href="/app/picklist">Pick List</s-link>
       </s-app-nav>
       <Outlet />

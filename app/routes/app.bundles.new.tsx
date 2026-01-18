@@ -20,6 +20,7 @@ interface ChildVariant {
 interface SelectedVariant {
   id: string;
   title: string;
+  sku?: string;
   product?: {
     title: string;
   };
@@ -35,12 +36,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const shop = session.shop;
 
   const formData = await request.formData();
-  const name = formData.get("name") as string;
   const parentGid = formData.get("parentGid") as string;
+  const parentTitle = formData.get("parentTitle") as string;
+  const parentSku = formData.get("parentSku") as string;
   const expandOnPick = formData.get("expandOnPick") === "true";
   const childrenJson = formData.get("children") as string;
 
-  if (!name || !parentGid || !childrenJson) {
+  if (!parentGid || !childrenJson) {
     return { error: "Missing required fields" };
   }
 
@@ -75,8 +77,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const bundle = await db.bundle.create({
     data: {
       shopId: shop,
-      name,
       parentGid,
+      parentTitle: parentTitle || null,
+      parentSku: parentSku || null,
       expandOnPick,
       children: {
         create: children.map((child) => ({
@@ -105,7 +108,6 @@ export default function NewBundle() {
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
 
-  const [name, setName] = useState("");
   const [parentVariant, setParentVariant] = useState<SelectedVariant | null>(
     null,
   );
@@ -113,6 +115,13 @@ export default function NewBundle() {
   const [expandOnPick, setExpandOnPick] = useState(false);
 
   const isSubmitting = fetcher.state === "submitting";
+
+  const getDisplayTitle = (variant: SelectedVariant): string => {
+    const productTitle = variant.product?.title ?? "Unknown Product";
+    return variant.title === "Default Title"
+      ? productTitle
+      : `${productTitle} - ${variant.title}`;
+  };
 
   const openParentPicker = async () => {
     const selection = await shopify.resourcePicker({
@@ -124,10 +133,6 @@ export default function NewBundle() {
     if (selection && selection.length > 0) {
       const variant = selection[0] as SelectedVariant;
       setParentVariant(variant);
-      if (!name) {
-        const productTitle = variant.product?.title ?? "Unknown Product";
-        setName(`${productTitle} - ${variant.title}`);
-      }
     }
   };
 
@@ -141,7 +146,7 @@ export default function NewBundle() {
     if (selection && selection.length > 0) {
       const newChildren = (selection as SelectedVariant[]).map((variant) => ({
         gid: variant.id,
-        title: `${variant.product?.title ?? "Unknown"} - ${variant.title}`,
+        title: getDisplayTitle(variant),
         quantity: 1,
       }));
 
@@ -180,11 +185,14 @@ export default function NewBundle() {
       return;
     }
 
+    const parentTitle = getDisplayTitle(parentVariant);
+
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(
       {
-        name,
         parentGid: parentVariant.id,
+        parentTitle,
+        parentSku: parentVariant.sku || "",
         expandOnPick: String(expandOnPick),
         children: JSON.stringify(children),
       },
@@ -211,49 +219,39 @@ export default function NewBundle() {
         </s-banner>
       )}
 
-      <s-section heading="Bundle Details">
+      <s-section heading="Parent Variant">
         <s-stack direction="block" gap="base">
-          <s-text-field
-            label="Bundle Name"
-            value={name}
-            placeholder="e.g., Lager 24-Pack Bundle"
-            onInput={(e: Event) => {
-              const target = e.target as HTMLInputElement;
-              setName(target.value);
-            }}
-            required
-          />
+          <s-paragraph>
+            Select the product variant that represents this bundle (e.g., the
+            24-Pack SKU). The bundle name will be derived from this variant.
+          </s-paragraph>
 
-          <s-stack direction="block" gap="small">
-            <s-heading>Parent Variant</s-heading>
-            <s-paragraph>
-              The product variant that represents this bundle (e.g., the 24-Pack
-              SKU)
-            </s-paragraph>
-            {parentVariant ? (
-              <s-box padding="base" borderWidth="base" borderRadius="base">
-                <s-stack
-                  direction="inline"
-                  gap="base"
-                  justifyContent="space-between"
-                >
-                  <s-stack direction="block" gap="small">
-                    <s-text type="strong">
-                      {parentVariant.product?.title} - {parentVariant.title}
-                    </s-text>
-                    <s-text tone="neutral">{parentVariant.id}</s-text>
-                  </s-stack>
-                  <s-button variant="secondary" onClick={openParentPicker}>
-                    Change
-                  </s-button>
+          {parentVariant ? (
+            <s-box padding="base" borderWidth="base" borderRadius="base">
+              <s-stack
+                direction="inline"
+                gap="base"
+                justifyContent="space-between"
+              >
+                <s-stack direction="block" gap="small">
+                  <s-text type="strong">
+                    {getDisplayTitle(parentVariant)}
+                  </s-text>
+                  {parentVariant.sku && (
+                    <s-text tone="neutral">SKU: {parentVariant.sku}</s-text>
+                  )}
+                  <s-text tone="neutral">{parentVariant.id}</s-text>
                 </s-stack>
-              </s-box>
-            ) : (
-              <s-button onClick={openParentPicker}>
-                Select Parent Variant
-              </s-button>
-            )}
-          </s-stack>
+                <s-button variant="secondary" onClick={openParentPicker}>
+                  Change
+                </s-button>
+              </s-stack>
+            </s-box>
+          ) : (
+            <s-button onClick={openParentPicker}>
+              Select Parent Variant
+            </s-button>
+          )}
         </s-stack>
       </s-section>
 
@@ -354,6 +352,13 @@ export default function NewBundle() {
           Child: &ldquo;Lager - Single&rdquo; with quantity 24
         </s-paragraph>
         <s-paragraph>48 singles in stock → 2 × 24-packs available</s-paragraph>
+      </s-section>
+
+      <s-section slot="aside" heading="Tip">
+        <s-paragraph>
+          Use <s-text type="strong">Quick Setup</s-text> from the bundles list
+          to automatically create bundles for all variants of a single product.
+        </s-paragraph>
       </s-section>
     </s-page>
   );

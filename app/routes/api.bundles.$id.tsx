@@ -16,7 +16,8 @@ import {
 } from "../services/metafields.server";
 
 interface UpdateBundleRequest {
-  name?: string;
+  parentTitle?: string;
+  parentSku?: string;
   expandOnPick?: boolean;
   children?: Array<{
     childGid: string;
@@ -59,8 +60,9 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   return Response.json({
     bundle: {
       id: bundle.id,
-      name: bundle.name,
       parentGid: bundle.parentGid,
+      parentTitle: bundle.parentTitle,
+      parentSku: bundle.parentSku,
       expandOnPick: bundle.expandOnPick,
       createdAt: bundle.createdAt.toISOString(),
       updatedAt: bundle.updatedAt.toISOString(),
@@ -153,7 +155,8 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 
     // Build update data
     const updateData: {
-      name?: string;
+      parentTitle?: string;
+      parentSku?: string;
       expandOnPick?: boolean;
       children?: {
         deleteMany: object;
@@ -161,8 +164,12 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       };
     } = {};
 
-    if (body.name !== undefined) {
-      updateData.name = body.name;
+    if (body.parentTitle !== undefined) {
+      updateData.parentTitle = body.parentTitle;
+    }
+
+    if (body.parentSku !== undefined) {
+      updateData.parentSku = body.parentSku;
     }
 
     if (body.expandOnPick !== undefined) {
@@ -195,8 +202,9 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     return Response.json({
       bundle: {
         id: bundle.id,
-        name: bundle.name,
         parentGid: bundle.parentGid,
+        parentTitle: bundle.parentTitle,
+        parentSku: bundle.parentSku,
         expandOnPick: bundle.expandOnPick,
         createdAt: bundle.createdAt.toISOString(),
         updatedAt: bundle.updatedAt.toISOString(),
