@@ -9,6 +9,10 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import {
+  syncBundleMetafield,
+  deleteBundleMetafield,
+} from "../services/metafields.server";
 
 interface ChildVariant {
   gid: string;
@@ -89,7 +93,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
   const bundleId = params.id;
 
@@ -101,6 +105,20 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const intent = formData.get("intent");
 
   if (intent === "delete") {
+    // Get the bundle first to get the parentGid
+    const bundle = await db.bundle.findUnique({
+      where: { id: bundleId, shopId: shop },
+    });
+
+    if (bundle) {
+      // Delete metafield first
+      try {
+        await deleteBundleMetafield(admin, bundle.parentGid);
+      } catch (error) {
+        console.error("Failed to delete bundle metafield:", error);
+      }
+    }
+
     await db.bundle.delete({
       where: {
         id: bundleId,
@@ -125,7 +143,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       return { error: "At least one child variant is required" };
     }
 
-    await db.bundle.update({
+    const bundle = await db.bundle.update({
       where: {
         id: bundleId,
         shopId: shop,
@@ -141,7 +159,17 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           })),
         },
       },
+      include: {
+        children: true,
+      },
     });
+
+    // Sync updated bundle to metafield
+    try {
+      await syncBundleMetafield(admin, bundle);
+    } catch (error) {
+      console.error("Failed to sync bundle metafield:", error);
+    }
 
     return { success: true };
   }

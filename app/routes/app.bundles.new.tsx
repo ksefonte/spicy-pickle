@@ -9,6 +9,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { syncBundleMetafield } from "../services/metafields.server";
 
 interface ChildVariant {
   gid: string;
@@ -30,7 +31,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
@@ -71,7 +72,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   // Create bundle with children
-  await db.bundle.create({
+  const bundle = await db.bundle.create({
     data: {
       shopId: shop,
       name,
@@ -84,7 +85,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         })),
       },
     },
+    include: {
+      children: true,
+    },
   });
+
+  // Sync bundle config to Shopify metafield
+  try {
+    await syncBundleMetafield(admin, bundle);
+  } catch (error) {
+    console.error("Failed to sync bundle metafield:", error);
+    // Continue anyway - bundle is created, metafield sync is best-effort
+  }
 
   return redirect("/app/bundles");
 };

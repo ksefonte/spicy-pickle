@@ -12,6 +12,10 @@ import {
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import {
+  syncBinLocationMetafield,
+  deleteBinLocationMetafield,
+} from "../services/metafields.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -47,7 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
@@ -55,6 +59,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "delete") {
     const locationId = formData.get("locationId") as string;
+
+    // Get the bin location first to get the variantGid
+    const binLocation = await db.binLocation.findUnique({
+      where: { id: locationId, shopId: shop },
+    });
+
+    if (binLocation) {
+      // Delete metafield
+      try {
+        await deleteBinLocationMetafield(admin, binLocation.variantGid);
+      } catch (error) {
+        console.error("Failed to delete bin location metafield:", error);
+      }
+    }
 
     await db.binLocation.delete({
       where: {
@@ -70,7 +88,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const locationId = formData.get("locationId") as string;
     const newLocation = formData.get("location") as string;
 
-    await db.binLocation.update({
+    const binLocation = await db.binLocation.update({
       where: {
         id: locationId,
         shopId: shop,
@@ -79,6 +97,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         location: newLocation,
       },
     });
+
+    // Sync to metafield
+    try {
+      await syncBinLocationMetafield(
+        admin,
+        binLocation.variantGid,
+        newLocation,
+      );
+    } catch (error) {
+      console.error("Failed to sync bin location metafield:", error);
+    }
 
     return { updated: true };
   }
@@ -110,6 +139,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         location,
       },
     });
+
+    // Sync to metafield
+    try {
+      await syncBinLocationMetafield(admin, variantGid, location);
+    } catch (error) {
+      console.error("Failed to sync bin location metafield:", error);
+    }
 
     return { created: true };
   }
