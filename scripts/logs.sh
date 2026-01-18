@@ -8,7 +8,7 @@ SERVICE_NAME="spicy-pickle"
 case "${1:-tail}" in
     tail)
         echo "📋 Tailing Cloud Run logs (Ctrl+C to stop)..."
-        gcloud run services logs tail "$SERVICE_NAME" \
+        gcloud beta run services logs tail "$SERVICE_NAME" \
             --project="$GCP_PROJECT" \
             --region="$GCP_REGION"
         ;;

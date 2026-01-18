@@ -435,7 +435,7 @@ export async function processInventoryUpdate(
         console.log(`[Sync]   → ${adj.inventoryItemId}: delta=${adj.delta}`);
       }
 
-      await adjustInventoryLevels(admin, adjustments, "Bundle inventory sync");
+      await adjustInventoryLevels(admin, adjustments, "correction");
 
       totalAdjustments += adjustments.length;
     } finally {
