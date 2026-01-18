@@ -308,7 +308,7 @@ export async function adjustInventoryLevels(
       delta: adj.delta,
     }));
 
-    await admin.graphql(
+    const response = await admin.graphql(
       `#graphql
         mutation adjustInventory($input: InventoryAdjustQuantitiesInput!) {
           inventoryAdjustQuantities(input: $input) {
@@ -318,6 +318,11 @@ export async function adjustInventoryLevels(
             }
             inventoryAdjustmentGroup {
               reason
+              changes {
+                name
+                delta
+                quantityAfterChange
+              }
             }
           }
         }
@@ -332,6 +337,23 @@ export async function adjustInventoryLevels(
         },
       },
     );
+
+    const data = await response.json();
+
+    // Log any errors
+    if (data.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
+      console.error(
+        "[Sync] Inventory adjustment errors:",
+        JSON.stringify(data.data.inventoryAdjustQuantities.userErrors),
+      );
+    }
+
+    // Log successful changes
+    const changesResult =
+      data.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup?.changes;
+    if (changesResult) {
+      console.log(`[Sync] Applied ${changesResult.length} inventory changes`);
+    }
   }
 }
 
@@ -404,6 +426,14 @@ export async function processInventoryUpdate(
         variantGid,
         available,
       );
+
+      // Log the adjustments for debugging
+      console.log(
+        `[Sync] Bundle ${bundle.name} (${bundle.id}): ${adjustments.length} adjustments`,
+      );
+      for (const adj of adjustments) {
+        console.log(`[Sync]   → ${adj.inventoryItemId}: delta=${adj.delta}`);
+      }
 
       await adjustInventoryLevels(admin, adjustments, "Bundle inventory sync");
 
