@@ -24,17 +24,12 @@ interface InventoryLevelUpdatePayload {
   location_id: number;
   available: number;
   updated_at: string;
+  // Some Shopify webhook formats include shop in payload
+  shop_domain?: string;
 }
 
-/**
- * Shopify webhook metadata passed via Pub/Sub attributes
- */
-interface ShopifyWebhookAttributes {
-  shop: string;
-  topic: string;
-  api_version: string;
-  webhook_id: string;
-}
+// Shopify webhook metadata is passed via Pub/Sub attributes with keys like:
+// X-Shopify-Shop-Domain, X-Shopify-Topic, X-Shopify-API-Version, X-Shopify-Webhook-Id
 
 /**
  * Handles inventory webhooks pushed via Google Cloud Pub/Sub.
@@ -75,21 +70,61 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   // Decode the base64 payload
-  let inventoryPayload: InventoryLevelUpdatePayload;
+  let inventoryPayload: InventoryLevelUpdatePayload | null;
+  let decoded: string;
   try {
-    const decoded = Buffer.from(message.data, "base64").toString("utf-8");
-    inventoryPayload = JSON.parse(decoded) as InventoryLevelUpdatePayload;
-  } catch {
-    console.error("[Pub/Sub] Failed to decode message data");
+    decoded = Buffer.from(message.data, "base64").toString("utf-8");
+    console.log("[Pub/Sub] Decoded payload:", decoded);
+    inventoryPayload = JSON.parse(
+      decoded,
+    ) as InventoryLevelUpdatePayload | null;
+  } catch (error) {
+    console.error("[Pub/Sub] Failed to decode message data:", error);
     return new Response("Invalid message data", { status: 400 });
   }
 
-  // Extract shop from attributes (set when publishing to Pub/Sub)
-  const attributes = message.attributes as ShopifyWebhookAttributes | undefined;
-  const shop = attributes?.shop;
+  // Handle null/empty payload (e.g., from test webhooks)
+  if (!inventoryPayload || typeof inventoryPayload !== "object") {
+    console.log(
+      "[Pub/Sub] Empty or invalid payload, acknowledging test webhook",
+    );
+    return new Response(null, { status: 200 });
+  }
+
+  // Validate required fields
+  if (
+    inventoryPayload.inventory_item_id === undefined ||
+    inventoryPayload.location_id === undefined ||
+    inventoryPayload.available === undefined
+  ) {
+    console.log("[Pub/Sub] Missing required fields in payload, acknowledging");
+    console.log("[Pub/Sub] Payload:", JSON.stringify(inventoryPayload));
+    return new Response(null, { status: 200 });
+  }
+
+  // Extract shop from attributes (set by Shopify when publishing to Pub/Sub)
+  // Shopify uses 'X-Shopify-Shop-Domain' as the attribute key
+  const attributes = message.attributes;
+
+  // Log all attributes to debug
+  console.log(
+    "[Pub/Sub] Message attributes:",
+    JSON.stringify(attributes ?? {}),
+  );
+
+  // Shopify may use different attribute keys - check attributes and payload
+  const shop =
+    attributes?.["X-Shopify-Shop-Domain"] ??
+    attributes?.["shop"] ??
+    attributes?.["shopDomain"] ??
+    inventoryPayload.shop_domain;
 
   if (!shop) {
-    console.error("[Pub/Sub] Missing shop attribute");
+    console.error(
+      "[Pub/Sub] Missing shop attribute. Available attributes:",
+      Object.keys(attributes ?? {}),
+    );
+    console.error("[Pub/Sub] Payload keys:", Object.keys(inventoryPayload));
     return new Response("Missing shop attribute", { status: 400 });
   }
 

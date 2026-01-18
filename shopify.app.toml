@@ -7,7 +7,6 @@ embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-04"
@@ -21,9 +20,16 @@ api_version = "2026-04"
   uri = "/webhooks/app/scopes_update"
 
   # Inventory webhook for bundle sync
+  # Option 1: Direct HTTPS (simpler, works for most use cases)
   [[webhooks.subscriptions]]
   topics = [ "inventory_levels/update" ]
   uri = "/webhooks/inventory"
+
+  # Option 2: Google Cloud Pub/Sub (for high-volume, reliable processing)
+  # Uncomment below and comment out HTTPS above to use Pub/Sub
+  # [[webhooks.subscriptions]]
+  # topics = [ "inventory_levels/update" ]
+  # uri = "pubsub://spicy-pickle-484622:spicy-pickle-inventory-webhooks"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
