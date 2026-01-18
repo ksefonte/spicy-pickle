@@ -2,7 +2,7 @@
 
 client_id = "109e82bde293da48ccecb6f05cd99ef3"
 name = "spicy-pickle"
-application_url = "https://example.com"
+application_url = "https://spicy-pickle-990586804218.australia-southeast1.run.app"
 embedded = true
 
 [build]
@@ -34,4 +34,4 @@ api_version = "2026-04"
 scopes = "read_products,write_products,read_inventory,write_inventory,read_orders"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://spicy-pickle-990586804218.australia-southeast1.run.app/auth/callback" ]
