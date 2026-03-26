@@ -20,6 +20,7 @@ import {
   detectBundleMetafieldNamespace,
   getCachedScan,
   writeScanCache,
+  fetchProductRelationships,
   type ProductMigrationInfo,
   type ProductMigrationStatus,
   type ProductCategory,
@@ -27,7 +28,14 @@ import {
   type MigrationResult,
   type BulkMigrationSummary,
   type MetafieldDiagnostic,
+  type ProductRelationshipDetail,
 } from "../services/migration.server";
+import {
+  addSingleRelationship,
+  removeSingleRelationship,
+  reattachProductRelationships,
+} from "../services/metaobject-writes.server";
+import { useAppBridge } from "@shopify/app-bridge-react";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -71,11 +79,35 @@ interface SyncPrismaResult {
   stats: SyncStats;
 }
 
+interface FetchRelationshipsResult {
+  intent: "fetch_relationships";
+  detail: ProductRelationshipDetail | null;
+}
+
+interface AddRelationshipResult {
+  intent: "add_relationship";
+  success: boolean;
+}
+
+interface RemoveRelationshipResult {
+  intent: "remove_relationship";
+  success: boolean;
+}
+
+interface ReattachResult {
+  intent: "reattach";
+  fixed: number;
+}
+
 type ActionResult =
   | ScanResult
   | MigrateOneResult
   | MigrateAllResult
-  | SyncPrismaResult;
+  | SyncPrismaResult
+  | FetchRelationshipsResult
+  | AddRelationshipResult
+  | RemoveRelationshipResult
+  | ReattachResult;
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
@@ -148,6 +180,42 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
 
+  if (intent === "fetch_relationships") {
+    const productGid = formData.get("productGid") as string;
+    const detail = await fetchProductRelationships(admin, productGid);
+    return {
+      intent: "fetch_relationships",
+      detail,
+    } satisfies FetchRelationshipsResult;
+  }
+
+  if (intent === "add_relationship") {
+    const variantGid = formData.get("variantGid") as string;
+    const childGid = formData.get("childGid") as string;
+    const quantity = parseInt(formData.get("quantity") as string, 10);
+    await addSingleRelationship(admin, variantGid, childGid, quantity);
+    return {
+      intent: "add_relationship",
+      success: true,
+    } satisfies AddRelationshipResult;
+  }
+
+  if (intent === "remove_relationship") {
+    const variantGid = formData.get("variantGid") as string;
+    const metaobjectGid = formData.get("metaobjectGid") as string;
+    await removeSingleRelationship(admin, variantGid, metaobjectGid);
+    return {
+      intent: "remove_relationship",
+      success: true,
+    } satisfies RemoveRelationshipResult;
+  }
+
+  if (intent === "reattach") {
+    const productGid = formData.get("productGid") as string;
+    const fixed = await reattachProductRelationships(admin, productGid);
+    return { intent: "reattach", fixed } satisfies ReattachResult;
+  }
+
   return { intent: "unknown" };
 };
 
@@ -204,6 +272,7 @@ export default function MigrationPage() {
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(
     new Set(),
   );
+  const [modalProductGid, setModalProductGid] = useState<string | null>(null);
 
   const isBusy = fetcher.state !== "idle";
 
@@ -446,36 +515,64 @@ export default function MigrationPage() {
                 label="Ready"
                 count={counts["ready"] ?? 0}
                 color="#2c6ecb"
+                onClick={() => {
+                  setStatusFilter("ready");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="Migrated"
                 count={counts["migrated"] ?? 0}
                 color="#008060"
+                onClick={() => {
+                  setStatusFilter("migrated");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="Ambiguous"
                 count={counts["ambiguous"] ?? 0}
                 color="#b98900"
+                onClick={() => {
+                  setStatusFilter("ambiguous");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="No Base"
                 count={counts["no_base"] ?? 0}
                 color="#b98900"
+                onClick={() => {
+                  setStatusFilter("no_base");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="Missing Data"
                 count={counts["missing_data"] ?? 0}
                 color="#b98900"
+                onClick={() => {
+                  setStatusFilter("missing_data");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="Skipped"
                 count={counts["skipped"] ?? 0}
                 color="#6d7175"
+                onClick={() => {
+                  setStatusFilter("skipped");
+                  setPage(0);
+                }}
               />
               <CountCard
                 label="Errors"
                 count={counts["error"] ?? 0}
                 color="#d72c0d"
+                onClick={() => {
+                  setStatusFilter("error");
+                  setPage(0);
+                }}
               />
             </div>
           )}
@@ -713,6 +810,7 @@ export default function MigrationPage() {
                           toggleExcludeVariant(product.gid, vGid)
                         }
                         onMigrate={handleMigrateOne}
+                        onOpenDetail={setModalProductGid}
                         isBusy={isBusy}
                         shopDomain={shopDomain}
                       />
@@ -764,12 +862,21 @@ export default function MigrationPage() {
             gets a metaobject linking it to the base with the correct quantity.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Ambiguous</s-text> products (multiple base
-            variants) and <s-text type="strong">No Base</s-text> products (mixed
-            packs) need manual configuration in the Shopify admin.
+            Click a product name to view and manage its relationships directly.
           </s-paragraph>
         </s-stack>
       </s-section>
+
+      {modalProductGid && (
+        <ProductDetailModal
+          productGid={modalProductGid}
+          shopDomain={shopDomain}
+          onClose={() => setModalProductGid(null)}
+          onChanged={() => {
+            void revalidator.revalidate();
+          }}
+        />
+      )}
     </s-page>
   );
 }
@@ -836,25 +943,32 @@ function CountCard({
   label,
   count,
   color,
+  onClick,
 }: {
   label: string;
   count: number;
   color: string;
+  onClick?: () => void;
 }) {
   return (
-    <div
+    <button
+      type="button"
+      onClick={onClick}
       style={{
         padding: "12px 16px",
         borderRadius: "8px",
         border: "1px solid var(--p-color-border-subdued)",
         textAlign: "center",
+        background: "white",
+        cursor: "pointer",
+        transition: "box-shadow 0.15s",
       }}
     >
       <div style={{ fontSize: "24px", fontWeight: 700, color }}>{count}</div>
       <div style={{ fontSize: "12px", color: "#6d7175", marginTop: "4px" }}>
         {label}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -922,6 +1036,7 @@ function ProductRow({
   onToggleExpand,
   onToggleExclude,
   onMigrate,
+  onOpenDetail,
   isBusy,
   shopDomain,
 }: {
@@ -934,6 +1049,7 @@ function ProductRow({
   onToggleExpand: () => void;
   onToggleExclude: (variantGid: string) => void;
   onMigrate: (p: ProductMigrationInfo) => void;
+  onOpenDetail: (gid: string) => void;
   isBusy: boolean;
   shopDomain: string;
 }) {
@@ -963,18 +1079,35 @@ function ProductRow({
           />
         </td>
         <td style={{ padding: "10px 8px" }}>
-          <a
-            href={adminUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              color: "#2c6ecb",
-              textDecoration: "none",
-              fontWeight: 600,
-            }}
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
           >
-            {product.title}
-          </a>
+            <button
+              type="button"
+              onClick={() => onOpenDetail(product.gid)}
+              style={{
+                background: "none",
+                border: "none",
+                padding: 0,
+                color: "#2c6ecb",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: "inherit",
+                textAlign: "left",
+              }}
+            >
+              {product.title}
+            </button>
+            <a
+              href={adminUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open in Shopify admin"
+              style={{ color: "#8c9196", fontSize: "12px", lineHeight: 1 }}
+            >
+              &#8599;
+            </a>
+          </span>
         </td>
         <td style={{ padding: "10px 8px" }}>
           <CategoryBadge category={product.category} />
@@ -1151,6 +1284,552 @@ function SingleResultBanner({ result }: { result: MigrationResult }) {
           ? `\u2713 Migrated \u2014 ${result.relationshipsCreated} relationship${result.relationshipsCreated !== 1 ? "s" : ""} created`
           : `\u2717 Failed: ${result.error}`}
       </s-text>
+    </div>
+  );
+}
+
+interface SelectedVariant {
+  id: string;
+  title: string;
+  product?: { title: string };
+}
+
+function ProductDetailModal({
+  productGid,
+  shopDomain,
+  onClose,
+  onChanged,
+}: {
+  productGid: string;
+  shopDomain: string;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const fetcher = useFetcher<ActionResult>();
+  const shopify = useAppBridge();
+  const [detail, setDetail] = useState<ProductRelationshipDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [addingFor, setAddingFor] = useState<string | null>(null);
+  const [addChild, setAddChild] = useState<SelectedVariant | null>(null);
+  const [addQuantity, setAddQuantity] = useState(1);
+
+  const productId = extractShopifyId(productGid);
+  const adminUrl = `https://admin.shopify.com/store/${shopDomain.replace(".myshopify.com", "")}/products/${productId}`;
+
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "fetch_relationships", productGid },
+      { method: "POST" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productGid]);
+
+  useEffect(() => {
+    if (!fetcher.data) return;
+
+    if ("detail" in fetcher.data) {
+      setDetail(fetcher.data.detail);
+      setLoading(false);
+    }
+
+    if ("success" in fetcher.data && fetcher.data.success) {
+      setAddingFor(null);
+      setAddChild(null);
+      setAddQuantity(1);
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      fetcher.submit(
+        { intent: "fetch_relationships", productGid },
+        { method: "POST" },
+      );
+      onChanged();
+    }
+
+    if ("fixed" in fetcher.data) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      fetcher.submit(
+        { intent: "fetch_relationships", productGid },
+        { method: "POST" },
+      );
+      onChanged();
+    }
+  }, [fetcher.data, productGid, onChanged]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isBusy = fetcher.state !== "idle";
+
+  const openChildPicker = async () => {
+    const selection = await shopify.resourcePicker({
+      type: "variant",
+      multiple: false,
+      action: "select",
+    });
+    if (selection && selection.length > 0) {
+      setAddChild(selection[0] as SelectedVariant);
+    }
+  };
+
+  const handleAddSubmit = (variantGid: string) => {
+    if (!addChild) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "add_relationship",
+        variantGid,
+        childGid: addChild.id,
+        quantity: String(addQuantity),
+      },
+      { method: "POST" },
+    );
+  };
+
+  const handleRemove = (variantGid: string, metaobjectGid: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "remove_relationship", variantGid, metaobjectGid },
+      { method: "POST" },
+    );
+  };
+
+  const handleReattach = () => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit({ intent: "reattach", productGid }, { method: "POST" });
+  };
+
+  const getChildDisplayTitle = (v: SelectedVariant): string => {
+    const productTitle = v.product?.title ?? "Unknown Product";
+    return v.title === "Default Title"
+      ? productTitle
+      : `${productTitle} - ${v.title}`;
+  };
+
+  return (
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 9999,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "rgba(0, 0, 0, 0.4)",
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
+    >
+      <div
+        style={{
+          background: "white",
+          borderRadius: "12px",
+          width: "min(90vw, 900px)",
+          maxHeight: "85vh",
+          overflow: "auto",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: "20px 24px",
+            borderBottom: "1px solid #e0e0e0",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            position: "sticky",
+            top: 0,
+            background: "white",
+            zIndex: 1,
+            borderRadius: "12px 12px 0 0",
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: "18px", fontWeight: 700 }}>
+              {detail?.productTitle ?? "Loading..."}
+            </h2>
+            <a
+              href={adminUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "#8c9196", fontSize: "12px" }}
+            >
+              Open in Shopify admin &#8599;
+            </a>
+          </div>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={handleReattach}
+              disabled={isBusy}
+              style={{
+                padding: "6px 12px",
+                fontSize: "13px",
+                borderRadius: "6px",
+                border: "1px solid #b98900",
+                background: "#fdf8e8",
+                color: "#b98900",
+                cursor: isBusy ? "not-allowed" : "pointer",
+                fontWeight: 600,
+              }}
+              title="Re-writes metafield values to fix admin display issues"
+            >
+              Fix Attachments
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                background: "none",
+                border: "none",
+                fontSize: "24px",
+                cursor: "pointer",
+                color: "#6d7175",
+                lineHeight: 1,
+                padding: "4px",
+              }}
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "20px 24px" }}>
+          {loading ? (
+            <div style={{ textAlign: "center", padding: "40px" }}>
+              <s-text>Loading relationships...</s-text>
+            </div>
+          ) : !detail ? (
+            <div style={{ textAlign: "center", padding: "40px" }}>
+              <s-text tone="critical">Failed to load product details</s-text>
+            </div>
+          ) : (
+            <div
+              style={{ display: "flex", flexDirection: "column", gap: "16px" }}
+            >
+              {detail.variants.map((variant) => {
+                const isAdding = addingFor === variant.gid;
+                return (
+                  <div
+                    key={variant.gid}
+                    style={{
+                      border: "1px solid #e0e0e0",
+                      borderRadius: "8px",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {/* Variant header */}
+                    <div
+                      style={{
+                        padding: "12px 16px",
+                        background: "#f9fafb",
+                        borderBottom:
+                          variant.relationships.length > 0 || isAdding
+                            ? "1px solid #e0e0e0"
+                            : "none",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
+                      <div>
+                        <span style={{ fontWeight: 600 }}>{variant.title}</span>
+                        {variant.sku && (
+                          <span
+                            style={{
+                              color: "#8c9196",
+                              marginLeft: "8px",
+                              fontSize: "13px",
+                            }}
+                          >
+                            SKU: {variant.sku}
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "8px",
+                          alignItems: "center",
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: "12px",
+                            color:
+                              variant.relationships.length > 0
+                                ? "#008060"
+                                : "#8c9196",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {variant.relationships.length} relationship
+                          {variant.relationships.length !== 1 ? "s" : ""}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAddingFor(isAdding ? null : variant.gid);
+                            setAddChild(null);
+                            setAddQuantity(1);
+                          }}
+                          style={{
+                            padding: "4px 10px",
+                            fontSize: "12px",
+                            borderRadius: "4px",
+                            border: "1px solid #2c6ecb",
+                            background: isAdding ? "#2c6ecb" : "white",
+                            color: isAdding ? "white" : "#2c6ecb",
+                            cursor: "pointer",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {isAdding ? "Cancel" : "+ Add"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Existing relationships */}
+                    {variant.relationships.length > 0 && (
+                      <table
+                        style={{
+                          width: "100%",
+                          fontSize: "13px",
+                          borderCollapse: "collapse",
+                        }}
+                      >
+                        <thead>
+                          <tr
+                            style={{
+                              borderBottom: "1px solid #eee",
+                              textAlign: "left",
+                            }}
+                          >
+                            <th
+                              style={{
+                                padding: "8px 16px",
+                                fontWeight: 600,
+                                color: "#6d7175",
+                              }}
+                            >
+                              Child Variant
+                            </th>
+                            <th
+                              style={{
+                                padding: "8px 16px",
+                                fontWeight: 600,
+                                color: "#6d7175",
+                              }}
+                            >
+                              SKU
+                            </th>
+                            <th
+                              style={{
+                                padding: "8px 16px",
+                                fontWeight: 600,
+                                color: "#6d7175",
+                                width: "80px",
+                              }}
+                            >
+                              Qty
+                            </th>
+                            <th
+                              style={{
+                                padding: "8px 16px",
+                                fontWeight: 600,
+                                color: "#6d7175",
+                                width: "80px",
+                                textAlign: "right",
+                              }}
+                            ></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {variant.relationships.map((rel) => (
+                            <tr
+                              key={rel.metaobjectGid}
+                              style={{ borderBottom: "1px solid #f0f0f0" }}
+                            >
+                              <td style={{ padding: "8px 16px" }}>
+                                {rel.childVariantTitle}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "8px 16px",
+                                  color: "#6d7175",
+                                }}
+                              >
+                                {rel.childSku ?? "\u2014"}
+                              </td>
+                              <td
+                                style={{ padding: "8px 16px", fontWeight: 600 }}
+                              >
+                                {rel.quantity}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "8px 16px",
+                                  textAlign: "right",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleRemove(variant.gid, rel.metaobjectGid)
+                                  }
+                                  disabled={isBusy}
+                                  style={{
+                                    padding: "2px 8px",
+                                    fontSize: "12px",
+                                    borderRadius: "4px",
+                                    border: "1px solid #d72c0d",
+                                    background: "white",
+                                    color: "#d72c0d",
+                                    cursor: isBusy ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+
+                    {/* Add relationship form */}
+                    {isAdding && (
+                      <div
+                        style={{
+                          padding: "12px 16px",
+                          background: "#f0f6ff",
+                          borderTop:
+                            variant.relationships.length > 0
+                              ? "1px solid #e0e0e0"
+                              : "none",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "12px",
+                            alignItems: "flex-end",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: "200px" }}>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: 600,
+                                marginBottom: "4px",
+                              }}
+                            >
+                              Child Variant
+                            </div>
+                            {addChild ? (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "8px",
+                                  alignItems: "center",
+                                }}
+                              >
+                                <span style={{ fontSize: "13px" }}>
+                                  {getChildDisplayTitle(addChild)}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => void openChildPicker()}
+                                  style={{
+                                    padding: "2px 8px",
+                                    fontSize: "12px",
+                                    borderRadius: "4px",
+                                    border: "1px solid var(--p-color-border)",
+                                    background: "white",
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  Change
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => void openChildPicker()}
+                                style={{
+                                  padding: "6px 12px",
+                                  fontSize: "13px",
+                                  borderRadius: "6px",
+                                  border: "1px solid var(--p-color-border)",
+                                  background: "white",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                Select Variant...
+                              </button>
+                            )}
+                          </div>
+                          <div style={{ width: "80px" }}>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                fontWeight: 600,
+                                marginBottom: "4px",
+                              }}
+                            >
+                              Quantity
+                            </div>
+                            <input
+                              type="number"
+                              min={1}
+                              value={addQuantity}
+                              onChange={(e) =>
+                                setAddQuantity(
+                                  parseInt(e.target.value, 10) || 1,
+                                )
+                              }
+                              style={{
+                                width: "100%",
+                                padding: "6px 8px",
+                                border: "1px solid var(--p-color-border)",
+                                borderRadius: "4px",
+                                fontSize: "13px",
+                              }}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleAddSubmit(variant.gid)}
+                            disabled={!addChild || isBusy}
+                            style={{
+                              padding: "6px 16px",
+                              fontSize: "13px",
+                              borderRadius: "6px",
+                              border: "none",
+                              background:
+                                addChild && !isBusy ? "#008060" : "#ccc",
+                              color: "white",
+                              cursor:
+                                addChild && !isBusy ? "pointer" : "not-allowed",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {isBusy ? "Saving..." : "Save"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -78,6 +78,27 @@ export interface BulkMigrationSummary {
   results: MigrationResult[];
 }
 
+export interface ResolvedRelationship {
+  metaobjectGid: string;
+  childVariantGid: string | null;
+  childVariantTitle: string;
+  childSku: string | null;
+  quantity: number;
+}
+
+export interface VariantRelationshipDetail {
+  gid: string;
+  title: string;
+  sku: string | null;
+  relationships: ResolvedRelationship[];
+}
+
+export interface ProductRelationshipDetail {
+  productGid: string;
+  productTitle: string;
+  variants: VariantRelationshipDetail[];
+}
+
 // ============================================================================
 // Scan Cache
 // ============================================================================
@@ -489,6 +510,150 @@ export async function rescanSingleProduct(
   }));
 
   return classifyProduct(product.id, product.title, variants);
+}
+
+/**
+ * Fetches a product's variants with their resolved product_relationship
+ * metaobject data (child variant title, quantity) for display in the UI.
+ */
+export async function fetchProductRelationships(
+  admin: AdminApiContext,
+  productGid: string,
+): Promise<ProductRelationshipDetail | null> {
+  const fieldMap = await getMetaobjectFieldMap(admin);
+
+  const response = await admin.graphql(
+    `#graphql
+      query GetProductRelationships($id: ID!, $ns: String!, $key: String!) {
+        product(id: $id) {
+          id
+          title
+          variants(first: 100) {
+            nodes {
+              id
+              title
+              sku
+              metafield(namespace: $ns, key: $key) {
+                value
+                references(first: 50) {
+                  nodes {
+                    ... on Metaobject {
+                      id
+                      fields {
+                        key
+                        value
+                        reference {
+                          ... on ProductVariant {
+                            id
+                            title
+                            sku
+                            product {
+                              title
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        id: productGid,
+        ns: ATTACHMENT_NAMESPACE,
+        key: ATTACHMENT_KEY,
+      },
+    },
+  );
+
+  interface FieldNode {
+    key: string;
+    value: string | null;
+    reference: {
+      id: string;
+      title: string;
+      sku: string | null;
+      product: { title: string };
+    } | null;
+  }
+
+  interface MetaobjectNode {
+    id: string;
+    fields: FieldNode[];
+  }
+
+  const data = (await response.json()) as {
+    data?: {
+      product?: {
+        id: string;
+        title: string;
+        variants: {
+          nodes: Array<{
+            id: string;
+            title: string;
+            sku: string | null;
+            metafield: {
+              value: string;
+              references: { nodes: MetaobjectNode[] };
+            } | null;
+          }>;
+        };
+      };
+    };
+  };
+
+  const product = data.data?.product;
+  if (!product) return null;
+
+  const variants: VariantRelationshipDetail[] = product.variants.nodes.map(
+    (v) => {
+      const relationships: ResolvedRelationship[] = [];
+
+      if (v.metafield?.references?.nodes) {
+        for (const mo of v.metafield.references.nodes) {
+          const childField = mo.fields.find((f) => f.key === fieldMap.childKey);
+          const quantityField = mo.fields.find(
+            (f) => f.key === fieldMap.quantityKey,
+          );
+
+          const childRef = childField?.reference;
+          const childTitle = childRef
+            ? childRef.title === "Default Title"
+              ? childRef.product.title
+              : `${childRef.product.title} - ${childRef.title}`
+            : (childField?.value ?? "Unknown");
+
+          relationships.push({
+            metaobjectGid: mo.id,
+            childVariantGid: childField?.value ?? null,
+            childVariantTitle: childTitle,
+            childSku: childRef?.sku ?? null,
+            quantity: quantityField?.value
+              ? parseInt(quantityField.value, 10)
+              : 0,
+          });
+        }
+      }
+
+      return {
+        gid: v.id,
+        title: v.title,
+        sku: v.sku,
+        relationships,
+      };
+    },
+  );
+
+  return {
+    productGid: product.id,
+    productTitle: product.title,
+    variants,
+  };
 }
 
 // ============================================================================

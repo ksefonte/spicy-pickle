@@ -168,6 +168,125 @@ async function createProductRelationship(
 }
 
 // ============================================================================
+// Single-relationship operations (used by the in-app relationship editor)
+// ============================================================================
+
+/**
+ * Adds a single product_relationship to a variant (appends to existing list).
+ */
+export async function addSingleRelationship(
+  admin: AdminApiContext,
+  variantGid: string,
+  childGid: string,
+  quantity: number,
+): Promise<string> {
+  const metaobjectGid = await createProductRelationship(
+    admin,
+    childGid,
+    quantity,
+  );
+  const existing = await getExistingAttachments(admin, variantGid);
+  await setVariantRelationships(admin, variantGid, [
+    ...existing,
+    metaobjectGid,
+  ]);
+  return metaobjectGid;
+}
+
+/**
+ * Removes a single product_relationship from a variant and deletes the metaobject.
+ */
+export async function removeSingleRelationship(
+  admin: AdminApiContext,
+  variantGid: string,
+  metaobjectGid: string,
+): Promise<void> {
+  const existing = await getExistingAttachments(admin, variantGid);
+  await setVariantRelationships(
+    admin,
+    variantGid,
+    existing.filter((g) => g !== metaobjectGid),
+  );
+
+  try {
+    await admin.graphql(
+      `#graphql
+        mutation DeleteMetaobject($id: ID!) {
+          metaobjectDelete(id: $id) {
+            deletedId
+            userErrors { field message }
+          }
+        }
+      `,
+      { variables: { id: metaobjectGid } },
+    );
+  } catch {
+    // Best-effort: metaobject may already be deleted
+  }
+}
+
+/**
+ * Re-writes all metafield attachment values for a product's variants.
+ * Fixes the issue where data written before the definition existed
+ * doesn't show in the Shopify admin UI.
+ */
+export async function reattachProductRelationships(
+  admin: AdminApiContext,
+  productGid: string,
+): Promise<number> {
+  const response = await admin.graphql(
+    `#graphql
+      query GetVariantAttachments($id: ID!, $ns: String!, $key: String!) {
+        product(id: $id) {
+          variants(first: 100) {
+            nodes {
+              id
+              metafield(namespace: $ns, key: $key) {
+                value
+              }
+            }
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        id: productGid,
+        ns: ATTACHMENT_NAMESPACE,
+        key: ATTACHMENT_KEY,
+      },
+    },
+  );
+
+  const data = (await response.json()) as {
+    data?: {
+      product?: {
+        variants: {
+          nodes: Array<{
+            id: string;
+            metafield: { value: string } | null;
+          }>;
+        };
+      };
+    };
+  };
+
+  let fixed = 0;
+  for (const v of data.data?.product?.variants.nodes ?? []) {
+    if (!v.metafield?.value) continue;
+    try {
+      const gids = JSON.parse(v.metafield.value) as string[];
+      if (!Array.isArray(gids) || gids.length === 0) continue;
+      await setVariantRelationships(admin, v.id, gids);
+      fixed++;
+    } catch {
+      // skip unparseable values
+    }
+  }
+  return fixed;
+}
+
+// ============================================================================
 // Attachment (variant ↔ metaobject list)
 // ============================================================================
 
