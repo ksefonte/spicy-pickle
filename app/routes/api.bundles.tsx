@@ -12,7 +12,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { syncBundleMetafield } from "../services/metafields.server";
+import { createBundleAsMetaobjects } from "../services/metaobject-writes.server";
 
 interface CreateBundleRequest {
   parentGid: string;
@@ -110,13 +110,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  // Ensure shop exists
-  await db.shop.upsert({
-    where: { id: shop },
-    create: { id: shop },
-    update: {},
-  });
-
   // Check for duplicate
   const existing = await db.bundle.findUnique({
     where: {
@@ -134,31 +127,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     );
   }
 
-  // Create bundle
-  const bundle = await db.bundle.create({
-    data: {
-      shopId: shop,
-      parentGid: body.parentGid,
+  const bundleId = await createBundleAsMetaobjects(
+    admin,
+    shop,
+    body.parentGid,
+    body.children,
+    {
       parentTitle: body.parentTitle || null,
       parentSku: body.parentSku || null,
       expandOnPick: body.expandOnPick ?? false,
-      children: {
-        create: body.children.map((child) => ({
-          childGid: child.childGid,
-          quantity: child.quantity,
-        })),
-      },
     },
-    include: {
-      children: true,
-    },
+  );
+
+  const bundle = await db.bundle.findUnique({
+    where: { id: bundleId },
+    include: { children: true },
   });
 
-  // Sync to metafield
-  try {
-    await syncBundleMetafield(admin, bundle);
-  } catch (error) {
-    console.error("Failed to sync bundle metafield:", error);
+  if (!bundle) {
+    return Response.json(
+      { error: "Bundle created but not found" },
+      { status: 500 },
+    );
   }
 
   return Response.json(

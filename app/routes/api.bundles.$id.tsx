@@ -11,9 +11,9 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import {
-  syncBundleMetafield,
-  deleteBundleMetafield,
-} from "../services/metafields.server";
+  updateBundleMetaobjects,
+  deleteBundleMetaobjects,
+} from "../services/metaobject-writes.server";
 
 interface UpdateBundleRequest {
   parentTitle?: string;
@@ -97,16 +97,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       return Response.json({ error: "Bundle not found" }, { status: 404 });
     }
 
-    // Delete metafield
-    try {
-      await deleteBundleMetafield(admin, bundle.parentGid);
-    } catch (error) {
-      console.error("Failed to delete bundle metafield:", error);
-    }
-
-    await db.bundle.delete({
-      where: { id: bundleId, shopId: shop },
-    });
+    await deleteBundleMetaobjects(admin, shop, bundle.parentGid);
 
     return Response.json({ deleted: true });
   }
@@ -153,50 +144,49 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       }
     }
 
-    // Build update data
-    const updateData: {
-      parentTitle?: string;
-      parentSku?: string;
-      expandOnPick?: boolean;
-      children?: {
-        deleteMany: object;
-        create: Array<{ childGid: string; quantity: number }>;
-      };
-    } = {};
-
-    if (body.parentTitle !== undefined) {
-      updateData.parentTitle = body.parentTitle;
-    }
-
-    if (body.parentSku !== undefined) {
-      updateData.parentSku = body.parentSku;
-    }
-
-    if (body.expandOnPick !== undefined) {
-      updateData.expandOnPick = body.expandOnPick;
-    }
-
+    // If children are being updated, use the full metaobject write path.
+    // Otherwise, only update Prisma metadata fields.
     if (body.children !== undefined) {
-      updateData.children = {
-        deleteMany: {},
-        create: body.children.map((child) => ({
-          childGid: child.childGid,
-          quantity: child.quantity,
-        })),
-      };
+      await updateBundleMetaobjects(
+        admin,
+        shop,
+        existingBundle.parentGid,
+        body.children,
+        {
+          parentTitle: body.parentTitle ?? existingBundle.parentTitle,
+          parentSku: body.parentSku ?? existingBundle.parentSku,
+          expandOnPick: body.expandOnPick ?? existingBundle.expandOnPick,
+        },
+      );
+    } else {
+      const updateData: {
+        parentTitle?: string;
+        parentSku?: string;
+        expandOnPick?: boolean;
+      } = {};
+
+      if (body.parentTitle !== undefined)
+        updateData.parentTitle = body.parentTitle;
+      if (body.parentSku !== undefined) updateData.parentSku = body.parentSku;
+      if (body.expandOnPick !== undefined)
+        updateData.expandOnPick = body.expandOnPick;
+
+      await db.bundle.update({
+        where: { id: bundleId, shopId: shop },
+        data: updateData,
+      });
     }
 
-    const bundle = await db.bundle.update({
+    const bundle = await db.bundle.findUnique({
       where: { id: bundleId, shopId: shop },
-      data: updateData,
       include: { children: true },
     });
 
-    // Sync to metafield
-    try {
-      await syncBundleMetafield(admin, bundle);
-    } catch (error) {
-      console.error("Failed to sync bundle metafield:", error);
+    if (!bundle) {
+      return Response.json(
+        { error: "Bundle not found after update" },
+        { status: 500 },
+      );
     }
 
     return Response.json({

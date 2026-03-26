@@ -10,9 +10,9 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import {
-  syncBundleMetafield,
-  deleteBundleMetafield,
-} from "../services/metafields.server";
+  updateBundleMetaobjects,
+  deleteBundleMetaobjects,
+} from "../services/metaobject-writes.server";
 
 interface ChildVariant {
   gid: string;
@@ -121,26 +121,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const intent = formData.get("intent");
 
   if (intent === "delete") {
-    // Get the bundle first to get the parentGid
     const bundle = await db.bundle.findUnique({
       where: { id: bundleId, shopId: shop },
     });
 
     if (bundle) {
-      // Delete metafield first
-      try {
-        await deleteBundleMetafield(admin, bundle.parentGid);
-      } catch (error) {
-        console.error("Failed to delete bundle metafield:", error);
-      }
+      await deleteBundleMetaobjects(admin, shop, bundle.parentGid);
     }
 
-    await db.bundle.delete({
-      where: {
-        id: bundleId,
-        shopId: shop,
-      },
-    });
     return redirect("/app/bundles");
   }
 
@@ -158,32 +146,26 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       return { error: "At least one child variant is required" };
     }
 
-    const bundle = await db.bundle.update({
-      where: {
-        id: bundleId,
-        shopId: shop,
-      },
-      data: {
-        expandOnPick,
-        children: {
-          deleteMany: {},
-          create: children.map((child) => ({
-            childGid: child.gid,
-            quantity: child.quantity,
-          })),
-        },
-      },
-      include: {
-        children: true,
-      },
+    const existingBundle = await db.bundle.findUnique({
+      where: { id: bundleId, shopId: shop },
     });
 
-    // Sync updated bundle to metafield
-    try {
-      await syncBundleMetafield(admin, bundle);
-    } catch (error) {
-      console.error("Failed to sync bundle metafield:", error);
+    if (!existingBundle) {
+      return { error: "Bundle not found" };
     }
+
+    await updateBundleMetaobjects(
+      admin,
+      shop,
+      existingBundle.parentGid,
+      children.map((c) => ({
+        childGid: c.gid,
+        quantity: c.quantity,
+      })),
+      {
+        expandOnPick,
+      },
+    );
 
     return { success: true };
   }

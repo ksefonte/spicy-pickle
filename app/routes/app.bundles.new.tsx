@@ -9,7 +9,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { syncBundleMetafield } from "../services/metafields.server";
+import { createBundleAsMetaobjects } from "../services/metaobject-writes.server";
 
 interface ChildVariant {
   gid: string;
@@ -52,13 +52,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { error: "At least one child variant is required" };
   }
 
-  // Ensure shop exists
-  await db.shop.upsert({
-    where: { id: shop },
-    create: { id: shop },
-    update: {},
-  });
-
   // Check if bundle already exists for this parent
   const existing = await db.bundle.findUnique({
     where: {
@@ -73,33 +66,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { error: "A bundle already exists for this variant" };
   }
 
-  // Create bundle with children
-  const bundle = await db.bundle.create({
-    data: {
-      shopId: shop,
-      parentGid,
+  await createBundleAsMetaobjects(
+    admin,
+    shop,
+    parentGid,
+    children.map((c) => ({
+      childGid: c.gid,
+      quantity: c.quantity,
+    })),
+    {
       parentTitle: parentTitle || null,
       parentSku: parentSku || null,
       expandOnPick,
-      children: {
-        create: children.map((child) => ({
-          childGid: child.gid,
-          quantity: child.quantity,
-        })),
-      },
     },
-    include: {
-      children: true,
-    },
-  });
-
-  // Sync bundle config to Shopify metafield
-  try {
-    await syncBundleMetafield(admin, bundle);
-  } catch (error) {
-    console.error("Failed to sync bundle metafield:", error);
-    // Continue anyway - bundle is created, metafield sync is best-effort
-  }
+  );
 
   return redirect("/app/bundles");
 };

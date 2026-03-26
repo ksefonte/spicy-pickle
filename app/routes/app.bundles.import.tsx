@@ -9,6 +9,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { updateBundleMetaobjects } from "../services/metaobject-writes.server";
 
 interface CsvRow {
   parent_gid: string;
@@ -32,7 +33,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
@@ -130,7 +131,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  // Create or update bundles
   let created = 0;
   let updated = 0;
 
@@ -142,39 +142,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
 
+      await updateBundleMetaobjects(
+        admin,
+        shop,
+        parentGid,
+        bundleData.children.map((c) => ({
+          childGid: c.gid,
+          quantity: c.quantity,
+        })),
+        {
+          parentTitle: bundleData.parentTitle || null,
+          parentSku: bundleData.parentSku || null,
+          expandOnPick: bundleData.expandOnPick,
+        },
+      );
+
       if (existing) {
-        await db.bundle.update({
-          where: { id: existing.id },
-          data: {
-            parentTitle: bundleData.parentTitle || existing.parentTitle,
-            parentSku: bundleData.parentSku || existing.parentSku,
-            expandOnPick: bundleData.expandOnPick,
-            children: {
-              deleteMany: {},
-              create: bundleData.children.map((c) => ({
-                childGid: c.gid,
-                quantity: c.quantity,
-              })),
-            },
-          },
-        });
         updated++;
       } else {
-        await db.bundle.create({
-          data: {
-            shopId: shop,
-            parentGid,
-            parentTitle: bundleData.parentTitle || null,
-            parentSku: bundleData.parentSku || null,
-            expandOnPick: bundleData.expandOnPick,
-            children: {
-              create: bundleData.children.map((c) => ({
-                childGid: c.gid,
-                quantity: c.quantity,
-              })),
-            },
-          },
-        });
         created++;
       }
     } catch (e) {

@@ -8,7 +8,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { useState, useEffect } from "react";
-import { syncBundleMetafield } from "../services/metafields.server";
+import { updateBundleMetaobjects } from "../services/metaobject-writes.server";
 
 interface ProductVariant {
   id: string;
@@ -162,55 +162,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    const createdBundles: string[] = [];
+    let createdCount = 0;
 
     for (const bundleConfig of bundles) {
       if (bundleConfig.quantity < 1) continue;
 
       const parentInfo = variantMap.get(bundleConfig.parentGid);
 
-      // Create or update the bundle
-      const bundle = await db.bundle.upsert({
-        where: {
-          shopId_parentGid: {
-            shopId: shop,
-            parentGid: bundleConfig.parentGid,
+      await updateBundleMetaobjects(
+        admin,
+        shop,
+        bundleConfig.parentGid,
+        [
+          {
+            childGid: baseVariantId,
+            quantity: bundleConfig.quantity,
           },
-        },
-        create: {
-          shopId: shop,
-          parentGid: bundleConfig.parentGid,
+        ],
+        {
           parentTitle: parentInfo?.title || bundleConfig.parentTitle,
           parentSku: parentInfo?.sku || bundleConfig.parentSku,
           expandOnPick: false,
-          children: {
-            create: {
-              childGid: baseVariantId,
-              quantity: bundleConfig.quantity,
-            },
-          },
         },
-        update: {
-          parentTitle: parentInfo?.title || bundleConfig.parentTitle,
-          parentSku: parentInfo?.sku || bundleConfig.parentSku,
-          children: {
-            deleteMany: {},
-            create: {
-              childGid: baseVariantId,
-              quantity: bundleConfig.quantity,
-            },
-          },
-        },
-        include: { children: true },
-      });
+      );
 
-      createdBundles.push(bundle.id);
-
-      // Sync metafield
-      await syncBundleMetafield(admin, bundle);
+      createdCount++;
     }
 
-    return { success: true, createdCount: createdBundles.length };
+    return { success: true, createdCount };
   }
 
   return { error: "Unknown action" };
