@@ -44,12 +44,13 @@ model Session {
 
 /// Represents a Shopify store using the app
 model Shop {
-  id           String        @id // shop domain (e.g., "my-store.myshopify.com")
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  bundles      Bundle[]
-  binLocations BinLocation[]
-  supplierSkus SupplierSku[]
+  id                   String        @id // shop domain (e.g., "my-store.myshopify.com")
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  lastMetaobjectSyncAt DateTime?
+  bundles              Bundle[]
+  binLocations         BinLocation[]
+  supplierSkus         SupplierSku[]
 }
 
 /// A bundle configuration linking a parent variant to its child components

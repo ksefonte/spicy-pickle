@@ -8,6 +8,10 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
+  syncMetaobjectsToPrisma,
+  type SyncStats,
+} from "../services/metaobject-sync.server";
+import {
   scanProducts,
   migrateProduct,
   migrateAllReady,
@@ -62,12 +66,26 @@ interface MigrateAllResult {
   summary: BulkMigrationSummary;
 }
 
-type ActionResult = ScanResult | MigrateOneResult | MigrateAllResult;
+interface SyncPrismaResult {
+  intent: "sync_prisma";
+  stats: SyncStats;
+}
+
+type ActionResult =
+  | ScanResult
+  | MigrateOneResult
+  | MigrateAllResult
+  | SyncPrismaResult;
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  if (intent === "sync_prisma") {
+    const stats = await syncMetaobjectsToPrisma(admin, session.shop);
+    return { intent: "sync_prisma", stats } satisfies SyncPrismaResult;
+  }
 
   if (intent === "scan") {
     const detection = await detectBundleMetafieldNamespace(admin);
@@ -366,7 +384,14 @@ export default function MigrationPage() {
     );
   };
 
+  const handleSyncPrisma = () => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit({ intent: "sync_prisma" }, { method: "POST" });
+  };
+
   const actionResult = fetcher.data;
+  const syncResult =
+    actionResult && "stats" in actionResult ? actionResult.stats : null;
 
   return (
     <s-page heading="Bundle Migration">
@@ -464,6 +489,41 @@ export default function MigrationPage() {
           {actionResult && "result" in actionResult && actionResult.result && (
             <SingleResultBanner result={actionResult.result} />
           )}
+
+          {syncResult && (
+            <div
+              style={{
+                padding: "12px 16px",
+                borderRadius: "8px",
+                border: "1px solid #008060",
+                backgroundColor: "#f0fdf4",
+              }}
+            >
+              <s-text>
+                {"\u2713"} Prisma sync complete: {syncResult.created} created,{" "}
+                {syncResult.updated} updated, {syncResult.deleted} deleted (
+                {syncResult.total} variant relationships found)
+              </s-text>
+            </div>
+          )}
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Prisma Sync">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Syncs <s-text type="strong">product_relationship</s-text>{" "}
+            metaobjects from Shopify into the local database used by inventory
+            sync and pick lists. Runs automatically every 5 minutes on page
+            load.
+          </s-paragraph>
+          <s-button
+            variant="secondary"
+            onClick={handleSyncPrisma}
+            disabled={isBusy}
+          >
+            {isBusy ? "Syncing..." : "Sync Now"}
+          </s-button>
         </s-stack>
       </s-section>
 
