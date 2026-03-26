@@ -37,7 +37,9 @@ api_version = "2026-04"
 # - Products: Read/write for bundle configuration and metafields
 # - Inventory: Read/write for bundle inventory sync
 # - Orders: Read for pick list generation
-scopes = "read_products,write_products,read_inventory,write_inventory,read_orders"
+# - Metaobject definitions: Read/write for product_relationship setup
+# - Metaobjects: Read/write for product_relationship entries
+scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_metaobject_definitions,write_metaobject_definitions,read_metaobjects,write_metaobjects"
 
 [auth]
 redirect_urls = [ "https://spicy-pickle-990586804218.australia-southeast1.run.app/auth/callback" ]
