@@ -3,57 +3,134 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
+import { useLoaderData, useFetcher, useRevalidator } from "react-router";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
   scanProducts,
   migrateProduct,
   migrateAllReady,
+  rescanSingleProduct,
+  updateProductInCache,
+  detectBundleMetafieldNamespace,
+  getCachedScan,
+  writeScanCache,
   type ProductMigrationInfo,
   type ProductMigrationStatus,
+  type ProductCategory,
+  type VariantInfo,
   type MigrationResult,
   type BulkMigrationSummary,
+  type MetafieldDiagnostic,
 } from "../services/migration.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const products = await scanProducts(admin);
-
-  const counts = {
-    ready: products.filter((p) => p.status === "ready").length,
-    migrated: products.filter((p) => p.status === "migrated").length,
-    ambiguous: products.filter((p) => p.status === "ambiguous").length,
-    noBase: products.filter((p) => p.status === "no_base").length,
-    missingData: products.filter((p) => p.status === "missing_data").length,
-    error: products.filter((p) => p.status === "error").length,
-    skipped: products.filter((p) => p.status === "skipped").length,
-  };
-
-  return { products, counts };
+  const { session } = await authenticate.admin(request);
+  const cached = await getCachedScan(session.shop);
+  if (cached) {
+    return {
+      intent: "scan" as const,
+      shopDomain: session.shop,
+      products: cached.products,
+      namespaces: cached.namespaces,
+      diagnostics: cached.diagnostics,
+      counts: cached.counts,
+      scannedAt: cached.scannedAt,
+    };
+  }
+  return { intent: "empty" as const, shopDomain: session.shop };
 };
 
+interface ScanResult {
+  intent: "scan";
+  shopDomain: string;
+  products: ProductMigrationInfo[];
+  namespaces: Record<string, string>;
+  diagnostics: MetafieldDiagnostic[];
+  counts: Record<string, number>;
+  scannedAt: string;
+}
+
+interface MigrateOneResult {
+  intent: "migrate_one";
+  result: MigrationResult;
+}
+
+interface MigrateAllResult {
+  intent: "migrate_all";
+  summary: BulkMigrationSummary;
+}
+
+type ActionResult = ScanResult | MigrateOneResult | MigrateAllResult;
+
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
+
+  if (intent === "scan") {
+    const detection = await detectBundleMetafieldNamespace(admin);
+    const products = await scanProducts(admin);
+
+    const counts: Record<string, number> = {};
+    for (const p of products) {
+      counts[p.status] = (counts[p.status] ?? 0) + 1;
+    }
+
+    const cacheData = {
+      products,
+      namespaces: detection.namespaces,
+      diagnostics: detection.diagnostics,
+      counts,
+    };
+
+    await writeScanCache(session.shop, cacheData);
+
+    return {
+      intent: "scan",
+      shopDomain: session.shop,
+      ...cacheData,
+      scannedAt: new Date().toISOString(),
+    } satisfies ScanResult;
+  }
 
   if (intent === "migrate_one") {
     const productJson = formData.get("product") as string;
     const product: ProductMigrationInfo = JSON.parse(
       productJson,
     ) as ProductMigrationInfo;
-    const result = await migrateProduct(admin, product);
-    return { intent: "migrate_one", result };
+    const result = await migrateProduct(admin, product, session.shop);
+
+    if (result.success) {
+      const refreshed = await rescanSingleProduct(admin, product.gid);
+      if (refreshed) {
+        await updateProductInCache(session.shop, refreshed);
+      }
+    }
+
+    return { intent: "migrate_one", result } satisfies MigrateOneResult;
+  }
+
+  if (intent === "migrate_selected") {
+    const productsJson = formData.get("products") as string;
+    const selectedProducts: ProductMigrationInfo[] = JSON.parse(
+      productsJson,
+    ) as ProductMigrationInfo[];
+    const readyProducts = selectedProducts.filter((p) => p.status === "ready");
+    const summary = await migrateAllReady(admin, readyProducts, session.shop);
+    return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
 
   if (intent === "migrate_all") {
+    const detection = await detectBundleMetafieldNamespace(admin);
+    void detection;
     const products = await scanProducts(admin);
-    const summary = await migrateAllReady(admin, products);
-    return { intent: "migrate_all", summary };
+    const summary = await migrateAllReady(admin, products, session.shop);
+    return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
 
-  return { intent: "unknown", error: "Unknown action" };
+  return { intent: "unknown" };
 };
 
 const STATUS_CONFIG: Record<
@@ -69,20 +146,188 @@ const STATUS_CONFIG: Record<
   skipped: { label: "Skipped", color: "#6d7175", bg: "#f6f6f7" },
 };
 
+const PAGE_SIZE = 20;
+
+const ALL_CATEGORIES: ProductCategory[] = [
+  "330ml Can",
+  "440ml Can",
+  "750ml Bottle",
+  "375ml Bottle",
+  "Poster",
+  "Miscellaneous",
+];
+
 export default function MigrationPage() {
-  const { products, counts } = useLoaderData<typeof loader>();
-  const fetcher = useFetcher<{
-    intent: string;
-    result?: MigrationResult;
-    summary?: BulkMigrationSummary;
-  }>();
+  const loaderData = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<ActionResult>();
+  const revalidator = useRevalidator();
+  const prevFetcherData = useRef(fetcher.data);
+
+  useEffect(() => {
+    if (fetcher.data === prevFetcherData.current) return;
+    prevFetcherData.current = fetcher.data;
+
+    if (
+      fetcher.data &&
+      "result" in fetcher.data &&
+      fetcher.data.result.success
+    ) {
+      void revalidator.revalidate();
+    }
+  }, [fetcher.data, revalidator]);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [categoryFilter, setCategoryFilter] = useState<string>("all");
+  const [selectedGids, setSelectedGids] = useState<Set<string>>(new Set());
+  const [excludedVariants, setExcludedVariants] = useState<
+    Record<string, Set<string>>
+  >({});
+  const [expandedProducts, setExpandedProducts] = useState<Set<string>>(
+    new Set(),
+  );
 
   const isBusy = fetcher.state !== "idle";
 
+  const actionScan =
+    fetcher.data && "products" in fetcher.data ? fetcher.data : null;
+  const loaderScan =
+    loaderData.intent === "scan" ? (loaderData as unknown as ScanResult) : null;
+  const scanData = actionScan ?? loaderScan;
+
+  const shopDomain = loaderData.shopDomain;
+  const allProducts = scanData?.products ?? [];
+  const namespaces = scanData?.namespaces ?? {};
+  const diagnostics = scanData?.diagnostics ?? [];
+  const counts = scanData?.counts ?? {};
+  const scannedAt = scanData?.scannedAt ?? null;
+
+  const toggleSelectAll = () => {
+    setSelectedGids((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        for (const p of selectableFiltered) next.delete(p.gid);
+      } else {
+        for (const p of selectableFiltered) next.add(p.gid);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelect = (gid: string) => {
+    setSelectedGids((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      return next;
+    });
+  };
+
+  const toggleExpanded = (gid: string) => {
+    setExpandedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      return next;
+    });
+  };
+
+  const toggleExcludeVariant = useCallback(
+    (productGid: string, variantGid: string) => {
+      setExcludedVariants((prev) => {
+        const productExclusions = new Set(prev[productGid] ?? []);
+        if (productExclusions.has(variantGid)) {
+          productExclusions.delete(variantGid);
+        } else {
+          productExclusions.add(variantGid);
+        }
+        return { ...prev, [productGid]: productExclusions };
+      });
+    },
+    [],
+  );
+
+  const getEffectiveProduct = useCallback(
+    (product: ProductMigrationInfo): ProductMigrationInfo => {
+      const excluded = excludedVariants[product.gid];
+      if (!excluded || excluded.size === 0) return product;
+      if (product.status !== "ambiguous") return product;
+
+      const remainingVariants = product.variants.filter(
+        (v) => !excluded.has(v.gid),
+      );
+      const baseVariants = remainingVariants.filter(
+        (v) => v.bundleBase === true,
+      );
+
+      if (baseVariants.length === 1) {
+        const baseVariant = baseVariants[0]!;
+        const nonBase = remainingVariants.filter(
+          (v) => v.gid !== baseVariant.gid && v.bundleBase !== true,
+        );
+        const missingQuant = nonBase.filter((v) => v.bundleQuant === null);
+        if (missingQuant.length > 0) {
+          return {
+            ...product,
+            status: "missing_data",
+            baseVariant,
+            statusDetail: `Missing bundle_quant on: ${missingQuant.map((v) => `"${v.title}"`).join(", ")}`,
+          };
+        }
+        return {
+          ...product,
+          status: "ready",
+          baseVariant,
+          variants: remainingVariants,
+          statusDetail: `Ready (${excluded.size} variant${excluded.size !== 1 ? "s" : ""} excluded). Base: "${baseVariant.title}", ${nonBase.length} to configure.`,
+        };
+      }
+      if (baseVariants.length === 0) {
+        return {
+          ...product,
+          status: "no_base",
+          baseVariant: null,
+          statusDetail: "All base variants excluded",
+        };
+      }
+      return {
+        ...product,
+        statusDetail: `Multiple base variants remain: ${baseVariants.map((v) => `"${v.title}"`).join(", ")}. Exclude more to resolve.`,
+      };
+    },
+    [excludedVariants],
+  );
+
+  const effectiveProducts = allProducts.map(getEffectiveProduct);
+
+  const filtered = effectiveProducts.filter((p) => {
+    const matchesSearch =
+      !search || p.title.toLowerCase().includes(search.toLowerCase());
+    const matchesStatus = statusFilter === "all" || p.status === statusFilter;
+    const matchesCategory =
+      categoryFilter === "all" || p.category === categoryFilter;
+    return matchesSearch && matchesStatus && matchesCategory;
+  });
+
+  const selectableFiltered = filtered.filter((p) => p.status === "ready");
+  const allFilteredSelected =
+    selectableFiltered.length > 0 &&
+    selectableFiltered.every((p) => selectedGids.has(p.gid));
+
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const pageProducts = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const readyCount = counts["ready"] ?? 0;
+
+  const handleScan = () => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit({ intent: "scan" }, { method: "POST" });
+  };
+
   const handleMigrateOne = (product: ProductMigrationInfo) => {
+    const effective = getEffectiveProduct(product);
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(
-      { intent: "migrate_one", product: JSON.stringify(product) },
+      { intent: "migrate_one", product: JSON.stringify(effective) },
       { method: "POST" },
     );
   };
@@ -90,7 +335,7 @@ export default function MigrationPage() {
   const handleMigrateAll = () => {
     if (
       !confirm(
-        `Migrate ${counts.ready} products? This will create product_relationship metaobjects for each.`,
+        `Migrate ${readyCount} products? This will create product_relationship metaobjects for each.`,
       )
     ) {
       return;
@@ -99,118 +344,352 @@ export default function MigrationPage() {
     fetcher.submit({ intent: "migrate_all" }, { method: "POST" });
   };
 
+  const handleMigrateSelected = () => {
+    const selectedProducts = effectiveProducts.filter(
+      (p) => selectedGids.has(p.gid) && p.status === "ready",
+    );
+    if (selectedProducts.length === 0) return;
+    if (
+      !confirm(
+        `Migrate ${selectedProducts.length} selected product${selectedProducts.length !== 1 ? "s" : ""}?`,
+      )
+    ) {
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "migrate_selected",
+        products: JSON.stringify(selectedProducts),
+      },
+      { method: "POST" },
+    );
+  };
+
   const actionResult = fetcher.data;
 
   return (
     <s-page heading="Bundle Migration">
-      <s-section heading="Summary">
+      <s-section heading="Scan">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Migrates existing <s-text type="strong">bundle_base</s-text> /{" "}
-            <s-text type="strong">bundle_quant</s-text> variant metafields into{" "}
-            <s-text type="strong">product_relationship</s-text> metaobjects.
+            Scans all products for <s-text type="strong">bundle_base</s-text> /{" "}
+            <s-text type="strong">bundle_quant</s-text> variant metafields and
+            classifies their migration status.
           </s-paragraph>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
-              gap: "12px",
-            }}
-          >
-            <CountCard label="Ready" count={counts.ready} color="#2c6ecb" />
-            <CountCard
-              label="Migrated"
-              count={counts.migrated}
-              color="#008060"
-            />
-            <CountCard
-              label="Ambiguous"
-              count={counts.ambiguous}
-              color="#b98900"
-            />
-            <CountCard label="No Base" count={counts.noBase} color="#b98900" />
-            <CountCard
-              label="Missing Data"
-              count={counts.missingData}
-              color="#b98900"
-            />
-            <CountCard label="Skipped" count={counts.skipped} color="#6d7175" />
-            <CountCard label="Errors" count={counts.error} color="#d72c0d" />
-          </div>
-
-          {counts.ready > 0 && (
-            <s-stack direction="inline" gap="base">
-              <s-button onClick={handleMigrateAll} disabled={isBusy}>
-                {isBusy ? "Migrating..." : `Migrate All (${counts.ready})`}
+          <s-stack direction="inline" gap="base">
+            <s-button onClick={handleScan} disabled={isBusy}>
+              {isBusy && !actionScan
+                ? "Scanning..."
+                : scanData
+                  ? "Re-scan Products"
+                  : "Scan Products"}
+            </s-button>
+            {readyCount > 0 && (
+              <s-button
+                variant="secondary"
+                onClick={handleMigrateAll}
+                disabled={isBusy}
+              >
+                {isBusy ? "Migrating..." : `Migrate All Ready (${readyCount})`}
               </s-button>
-            </s-stack>
+            )}
+            {scannedAt && (
+              <s-text tone="neutral">
+                Last scanned: {new Date(scannedAt).toLocaleString()}
+              </s-text>
+            )}
+          </s-stack>
+
+          {scanData && (
+            <NamespaceBanner
+              namespaces={namespaces}
+              diagnostics={diagnostics}
+            />
           )}
 
-          {actionResult?.intent === "migrate_all" && actionResult.summary && (
-            <ActionResultBanner summary={actionResult.summary} />
+          {scanData && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))",
+                gap: "8px",
+              }}
+            >
+              <CountCard
+                label="Ready"
+                count={counts["ready"] ?? 0}
+                color="#2c6ecb"
+              />
+              <CountCard
+                label="Migrated"
+                count={counts["migrated"] ?? 0}
+                color="#008060"
+              />
+              <CountCard
+                label="Ambiguous"
+                count={counts["ambiguous"] ?? 0}
+                color="#b98900"
+              />
+              <CountCard
+                label="No Base"
+                count={counts["no_base"] ?? 0}
+                color="#b98900"
+              />
+              <CountCard
+                label="Missing Data"
+                count={counts["missing_data"] ?? 0}
+                color="#b98900"
+              />
+              <CountCard
+                label="Skipped"
+                count={counts["skipped"] ?? 0}
+                color="#6d7175"
+              />
+              <CountCard
+                label="Errors"
+                count={counts["error"] ?? 0}
+                color="#d72c0d"
+              />
+            </div>
           )}
 
-          {actionResult?.intent === "migrate_one" && actionResult.result && (
+          {actionResult &&
+            "summary" in actionResult &&
+            actionResult.summary && (
+              <ActionResultBanner summary={actionResult.summary} />
+            )}
+
+          {actionResult && "result" in actionResult && actionResult.result && (
             <SingleResultBanner result={actionResult.result} />
           )}
         </s-stack>
       </s-section>
 
-      <s-section heading="Products">
-        <div style={{ overflowX: "auto" }}>
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: "14px",
-            }}
-          >
-            <thead>
-              <tr
-                style={{
-                  borderBottom: "2px solid var(--p-color-border)",
-                  textAlign: "left",
-                }}
-              >
-                <th style={{ padding: "12px 8px", fontWeight: 600 }}>
-                  Product
-                </th>
-                <th style={{ padding: "12px 8px", fontWeight: 600 }}>
-                  Variants
-                </th>
-                <th style={{ padding: "12px 8px", fontWeight: 600 }}>
-                  Base Variant
-                </th>
-                <th style={{ padding: "12px 8px", fontWeight: 600 }}>Status</th>
-                <th style={{ padding: "12px 8px", fontWeight: 600 }}>Detail</th>
-                <th
+      {scanData && (
+        <s-section heading={`Products (${filtered.length})`}>
+          <s-stack direction="block" gap="base">
+            <s-stack direction="inline" gap="base">
+              <div style={{ flex: 1, minWidth: "200px" }}>
+                <s-text-field
+                  label="Search products"
+                  value={search}
+                  placeholder="Filter by product name..."
+                  onInput={(e: Event) => {
+                    const target = e.target as HTMLInputElement;
+                    setSearch(target.value);
+                    setPage(0);
+                  }}
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="status-filter"
                   style={{
-                    padding: "12px 8px",
-                    fontWeight: 600,
-                    textAlign: "right",
+                    display: "block",
+                    fontSize: "12px",
+                    marginBottom: "4px",
                   }}
                 >
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {products.map((product) => (
-                <ProductRow
-                  key={product.gid}
-                  product={product}
-                  onMigrate={handleMigrateOne}
-                  isBusy={isBusy}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <s-text tone="neutral">
-          {products.length} product{products.length !== 1 ? "s" : ""} scanned
-        </s-text>
-      </s-section>
+                  Status filter
+                </label>
+                <select
+                  id="status-filter"
+                  value={statusFilter}
+                  onChange={(e) => {
+                    setStatusFilter(e.target.value);
+                    setPage(0);
+                  }}
+                  style={{
+                    padding: "8px 12px",
+                    border: "1px solid var(--p-color-border)",
+                    borderRadius: "4px",
+                    fontSize: "14px",
+                  }}
+                >
+                  <option value="all">All</option>
+                  <option value="ready">Ready</option>
+                  <option value="migrated">Migrated</option>
+                  <option value="ambiguous">Ambiguous</option>
+                  <option value="no_base">No Base</option>
+                  <option value="missing_data">Missing Data</option>
+                  <option value="skipped">Skipped</option>
+                  <option value="error">Error</option>
+                </select>
+              </div>
+              <div>
+                <label
+                  htmlFor="category-filter"
+                  style={{
+                    display: "block",
+                    fontSize: "12px",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Category
+                </label>
+                <select
+                  id="category-filter"
+                  value={categoryFilter}
+                  onChange={(e) => {
+                    setCategoryFilter(e.target.value);
+                    setPage(0);
+                  }}
+                  style={{
+                    padding: "8px 12px",
+                    border: "1px solid var(--p-color-border)",
+                    borderRadius: "4px",
+                    fontSize: "14px",
+                  }}
+                >
+                  <option value="all">All Categories</option>
+                  {ALL_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </s-stack>
+
+            {selectedGids.size > 0 && (
+              <s-stack direction="inline" gap="base">
+                <s-text>
+                  {selectedGids.size} product
+                  {selectedGids.size !== 1 ? "s" : ""} selected
+                </s-text>
+                <s-button
+                  variant="primary"
+                  onClick={handleMigrateSelected}
+                  disabled={isBusy}
+                >
+                  Migrate Selected ({selectedGids.size})
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  onClick={() => setSelectedGids(new Set())}
+                >
+                  Clear Selection
+                </s-button>
+              </s-stack>
+            )}
+
+            <div style={{ overflowX: "auto" }}>
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: "14px",
+                }}
+              >
+                <thead>
+                  <tr
+                    style={{
+                      borderBottom: "2px solid var(--p-color-border)",
+                      textAlign: "left",
+                    }}
+                  >
+                    <th
+                      style={{
+                        padding: "12px 8px",
+                        fontWeight: 600,
+                        width: "40px",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleSelectAll}
+                        title="Select all ready products in current filter"
+                      />
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Product
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Category
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Variants
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Base Variant
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Status
+                    </th>
+                    <th style={{ padding: "12px 8px", fontWeight: 600 }}>
+                      Detail
+                    </th>
+                    <th
+                      style={{
+                        padding: "12px 8px",
+                        fontWeight: 600,
+                        textAlign: "right",
+                      }}
+                    >
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageProducts.map((product) => {
+                    const original =
+                      allProducts.find((p) => p.gid === product.gid) ?? product;
+                    return (
+                      <ProductRow
+                        key={product.gid}
+                        product={product}
+                        originalProduct={original}
+                        selected={selectedGids.has(product.gid)}
+                        expanded={expandedProducts.has(product.gid)}
+                        excludedGids={
+                          excludedVariants[product.gid] ?? new Set()
+                        }
+                        onToggle={() => toggleSelect(product.gid)}
+                        onToggleExpand={() => toggleExpanded(product.gid)}
+                        onToggleExclude={(vGid) =>
+                          toggleExcludeVariant(product.gid, vGid)
+                        }
+                        onMigrate={handleMigrateOne}
+                        isBusy={isBusy}
+                        shopDomain={shopDomain}
+                      />
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {totalPages > 1 && (
+              <s-stack direction="inline" gap="small">
+                <s-button
+                  variant="tertiary"
+                  disabled={page === 0}
+                  onClick={() => setPage(page - 1)}
+                >
+                  Previous
+                </s-button>
+                <s-text>
+                  Page {page + 1} of {totalPages}
+                </s-text>
+                <s-button
+                  variant="tertiary"
+                  disabled={page >= totalPages - 1}
+                  onClick={() => setPage(page + 1)}
+                >
+                  Next
+                </s-button>
+              </s-stack>
+            )}
+
+            <s-text tone="neutral">
+              Showing {pageProducts.length} of {filtered.length} products
+            </s-text>
+          </s-stack>
+        </s-section>
+      )}
 
       <s-section slot="aside" heading="About Migration">
         <s-stack direction="block" gap="base">
@@ -232,6 +711,64 @@ export default function MigrationPage() {
         </s-stack>
       </s-section>
     </s-page>
+  );
+}
+
+function NamespaceBanner({
+  namespaces,
+  diagnostics,
+}: {
+  namespaces: Record<string, string>;
+  diagnostics: MetafieldDiagnostic[];
+}) {
+  const entries = Object.entries(namespaces);
+
+  if (entries.length === 0 && diagnostics.length === 0) {
+    return (
+      <div
+        style={{
+          padding: "12px 16px",
+          borderRadius: "8px",
+          border: "1px solid #b98900",
+          backgroundColor: "#fdf8e8",
+        }}
+      >
+        <s-stack direction="block" gap="small">
+          <s-text type="strong">Namespace not detected</s-text>
+          <s-text>
+            Could not find <code>bundle_base</code> or <code>bundle_quant</code>{" "}
+            metafields on any variant in the first 50 variants sampled. Check
+            that these metafields exist and are populated.
+          </s-text>
+        </s-stack>
+      </div>
+    );
+  }
+
+  const isMixed = new Set(entries.map(([, ns]) => ns)).size > 1;
+
+  return (
+    <div
+      style={{
+        padding: "12px 16px",
+        borderRadius: "8px",
+        border: `1px solid ${isMixed ? "#b98900" : "#008060"}`,
+        backgroundColor: isMixed ? "#fdf8e8" : "#f0fdf4",
+      }}
+    >
+      <s-stack direction="block" gap="small">
+        {entries.map(([key, ns]) => (
+          <s-text key={key}>
+            <code>{key}</code>: <code>{ns}</code> namespace
+          </s-text>
+        ))}
+        <s-text>
+          {diagnostics.length} metafield sample
+          {diagnostics.length !== 1 ? "s" : ""} found
+          {isMixed && " (mixed namespaces detected)"}
+        </s-text>
+      </s-stack>
+    </div>
   );
 }
 
@@ -261,6 +798,36 @@ function CountCard({
   );
 }
 
+const CATEGORY_COLORS: Record<ProductCategory, { color: string; bg: string }> =
+  {
+    "330ml Can": { color: "#1f5199", bg: "#e8f0fe" },
+    "440ml Can": { color: "#2c6ecb", bg: "#f0f6ff" },
+    "750ml Bottle": { color: "#6b21a8", bg: "#f3e8ff" },
+    "375ml Bottle": { color: "#9333ea", bg: "#faf5ff" },
+    Poster: { color: "#92400e", bg: "#fef3c7" },
+    Miscellaneous: { color: "#6d7175", bg: "#f6f6f7" },
+  };
+
+function CategoryBadge({ category }: { category: ProductCategory }) {
+  const config = CATEGORY_COLORS[category];
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "2px 10px",
+        borderRadius: "12px",
+        fontSize: "12px",
+        fontWeight: 600,
+        color: config.color,
+        backgroundColor: config.bg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {category}
+    </span>
+  );
+}
+
 function StatusBadge({ status }: { status: ProductMigrationStatus }) {
   const config = STATUS_CONFIG[status];
   return (
@@ -281,48 +848,203 @@ function StatusBadge({ status }: { status: ProductMigrationStatus }) {
   );
 }
 
+function extractShopifyId(gid: string): string {
+  return gid.split("/").pop() ?? gid;
+}
+
 function ProductRow({
   product,
+  originalProduct,
+  selected,
+  expanded,
+  excludedGids,
+  onToggle,
+  onToggleExpand,
+  onToggleExclude,
   onMigrate,
   isBusy,
+  shopDomain,
 }: {
   product: ProductMigrationInfo;
+  originalProduct: ProductMigrationInfo;
+  selected: boolean;
+  expanded: boolean;
+  excludedGids: Set<string>;
+  onToggle: () => void;
+  onToggleExpand: () => void;
+  onToggleExclude: (variantGid: string) => void;
   onMigrate: (p: ProductMigrationInfo) => void;
   isBusy: boolean;
+  shopDomain: string;
+}) {
+  const isSelectable = product.status === "ready";
+  const isExpandable =
+    originalProduct.status === "ambiguous" ||
+    originalProduct.status === "no_base";
+  const productId = extractShopifyId(product.gid);
+  const adminUrl = `https://admin.shopify.com/store/${shopDomain.replace(".myshopify.com", "")}/products/${productId}`;
+  const colCount = 8;
+
+  return (
+    <>
+      <tr
+        style={{
+          borderBottom: expanded
+            ? "none"
+            : "1px solid var(--p-color-border-subdued)",
+        }}
+      >
+        <td style={{ padding: "10px 8px" }}>
+          <input
+            type="checkbox"
+            checked={selected}
+            disabled={!isSelectable}
+            onChange={onToggle}
+          />
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <a
+            href={adminUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              color: "#2c6ecb",
+              textDecoration: "none",
+              fontWeight: 600,
+            }}
+          >
+            {product.title}
+          </a>
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <CategoryBadge category={product.category} />
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <s-text>{product.variants.length}</s-text>
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <s-text>
+            {product.baseVariant
+              ? `${product.baseVariant.title}${product.baseVariant.sku ? ` (${product.baseVariant.sku})` : ""}`
+              : "\u2014"}
+          </s-text>
+        </td>
+        <td style={{ padding: "10px 8px" }}>
+          <StatusBadge status={product.status} />
+        </td>
+        <td style={{ padding: "10px 8px", maxWidth: "300px" }}>
+          <s-text tone="neutral">{product.statusDetail}</s-text>
+        </td>
+        <td style={{ padding: "10px 8px", textAlign: "right" }}>
+          <div
+            style={{ display: "flex", gap: "4px", justifyContent: "flex-end" }}
+          >
+            {isExpandable && (
+              <s-button variant="tertiary" onClick={onToggleExpand}>
+                {expanded ? "Collapse" : "Edit"}
+              </s-button>
+            )}
+            {product.status === "ready" && (
+              <s-button
+                variant="tertiary"
+                onClick={() => onMigrate(product)}
+                disabled={isBusy}
+              >
+                Migrate
+              </s-button>
+            )}
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr style={{ borderBottom: "1px solid var(--p-color-border-subdued)" }}>
+          <td colSpan={colCount} style={{ padding: "0 8px 12px 40px" }}>
+            <VariantExclusionPanel
+              variants={originalProduct.variants}
+              excludedGids={excludedGids}
+              onToggleExclude={onToggleExclude}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function VariantExclusionPanel({
+  variants,
+  excludedGids,
+  onToggleExclude,
+}: {
+  variants: VariantInfo[];
+  excludedGids: Set<string>;
+  onToggleExclude: (gid: string) => void;
 }) {
   return (
-    <tr style={{ borderBottom: "1px solid var(--p-color-border-subdued)" }}>
-      <td style={{ padding: "10px 8px" }}>
-        <s-text type="strong">{product.title}</s-text>
-      </td>
-      <td style={{ padding: "10px 8px" }}>
-        <s-text>{product.variants.length}</s-text>
-      </td>
-      <td style={{ padding: "10px 8px" }}>
-        <s-text>
-          {product.baseVariant
-            ? `${product.baseVariant.title}${product.baseVariant.sku ? ` (${product.baseVariant.sku})` : ""}`
-            : "—"}
+    <div
+      style={{
+        background: "#f9fafb",
+        borderRadius: "6px",
+        padding: "12px",
+        marginTop: "4px",
+      }}
+    >
+      <div style={{ marginBottom: "8px" }}>
+        <s-text type="strong">
+          Variants — uncheck to exclude from migration:
         </s-text>
-      </td>
-      <td style={{ padding: "10px 8px" }}>
-        <StatusBadge status={product.status} />
-      </td>
-      <td style={{ padding: "10px 8px", maxWidth: "300px" }}>
-        <s-text tone="neutral">{product.statusDetail}</s-text>
-      </td>
-      <td style={{ padding: "10px 8px", textAlign: "right" }}>
-        {product.status === "ready" && (
-          <s-button
-            variant="tertiary"
-            onClick={() => onMigrate(product)}
-            disabled={isBusy}
-          >
-            Migrate
-          </s-button>
-        )}
-      </td>
-    </tr>
+      </div>
+      <table
+        style={{ width: "100%", fontSize: "13px", borderCollapse: "collapse" }}
+      >
+        <thead>
+          <tr style={{ textAlign: "left", borderBottom: "1px solid #e0e0e0" }}>
+            <th style={{ padding: "6px 8px", fontWeight: 600, width: "40px" }}>
+              Include
+            </th>
+            <th style={{ padding: "6px 8px", fontWeight: 600 }}>Variant</th>
+            <th style={{ padding: "6px 8px", fontWeight: 600 }}>SKU</th>
+            <th style={{ padding: "6px 8px", fontWeight: 600 }}>Base?</th>
+            <th style={{ padding: "6px 8px", fontWeight: 600 }}>Quantity</th>
+          </tr>
+        </thead>
+        <tbody>
+          {variants.map((v) => {
+            const excluded = excludedGids.has(v.gid);
+            return (
+              <tr
+                key={v.gid}
+                style={{
+                  borderBottom: "1px solid #eee",
+                  opacity: excluded ? 0.5 : 1,
+                  textDecoration: excluded ? "line-through" : "none",
+                }}
+              >
+                <td style={{ padding: "6px 8px" }}>
+                  <input
+                    type="checkbox"
+                    checked={!excluded}
+                    onChange={() => onToggleExclude(v.gid)}
+                  />
+                </td>
+                <td style={{ padding: "6px 8px" }}>{v.title}</td>
+                <td style={{ padding: "6px 8px" }}>{v.sku ?? "\u2014"}</td>
+                <td style={{ padding: "6px 8px" }}>
+                  {v.bundleBase === true
+                    ? "\u2705"
+                    : v.bundleBase === false
+                      ? "\u274C"
+                      : "\u2014"}
+                </td>
+                <td style={{ padding: "6px 8px" }}>
+                  {v.bundleQuant ?? "\u2014"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -339,8 +1061,8 @@ function ActionResultBanner({ summary }: { summary: BulkMigrationSummary }) {
       <s-stack direction="block" gap="small">
         <s-text type="strong">Bulk Migration Complete</s-text>
         <s-text>
-          ✓ {summary.migrated} migrated &nbsp; ⚠ {summary.skipped} skipped
-          &nbsp; ✗ {summary.failed} failed
+          {"\u2713"} {summary.migrated} migrated &nbsp; {"\u26A0"}{" "}
+          {summary.skipped} skipped &nbsp; {"\u2717"} {summary.failed} failed
         </s-text>
         {summary.results
           .filter((r) => !r.success)
@@ -366,8 +1088,8 @@ function SingleResultBanner({ result }: { result: MigrationResult }) {
     >
       <s-text>
         {result.success
-          ? `✓ Migrated — ${result.relationshipsCreated} relationship${result.relationshipsCreated !== 1 ? "s" : ""} created`
-          : `✗ Failed: ${result.error}`}
+          ? `\u2713 Migrated \u2014 ${result.relationshipsCreated} relationship${result.relationshipsCreated !== 1 ? "s" : ""} created`
+          : `\u2717 Failed: ${result.error}`}
       </s-text>
     </div>
   );

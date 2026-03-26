@@ -7,20 +7,22 @@
  */
 
 import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
+import { getMetaobjectFieldMap } from "./metaobject-setup.server";
+import prisma from "../db.server";
 
 // Metafield location for the existing bundle config on variants.
-// These are merchant-created metafields set up outside the app.
-const BUNDLE_BASE_NAMESPACE = "custom";
+// Detected at runtime via detectBundleMetafieldNamespace().
+let BUNDLE_BASE_NAMESPACE = "custom";
 const BUNDLE_BASE_KEY = "bundle_base";
-const BUNDLE_QUANT_NAMESPACE = "custom";
+let BUNDLE_QUANT_NAMESPACE = "custom";
 const BUNDLE_QUANT_KEY = "bundle_quant";
 
 // Metaobject type for the new product relationships
 const METAOBJECT_TYPE = "product_relationship";
 
-// App-owned metafield for attaching relationships to variants
-const ATTACHMENT_NAMESPACE = "$app:spicy_pickle";
-const ATTACHMENT_KEY = "bundle_children";
+// Metafield for attaching product_relationship metaobjects to variants
+const ATTACHMENT_NAMESPACE = "custom";
+const ATTACHMENT_KEY = "product_relationships";
 
 // ============================================================================
 // Types
@@ -44,6 +46,14 @@ export interface VariantInfo {
   hasBundleChildren: boolean;
 }
 
+export type ProductCategory =
+  | "330ml Can"
+  | "440ml Can"
+  | "750ml Bottle"
+  | "375ml Bottle"
+  | "Poster"
+  | "Miscellaneous";
+
 export interface ProductMigrationInfo {
   gid: string;
   title: string;
@@ -51,6 +61,7 @@ export interface ProductMigrationInfo {
   status: ProductMigrationStatus;
   baseVariant: VariantInfo | null;
   statusDetail: string;
+  category: ProductCategory;
 }
 
 export interface MigrationResult {
@@ -65,6 +76,211 @@ export interface BulkMigrationSummary {
   skipped: number;
   failed: number;
   results: MigrationResult[];
+}
+
+// ============================================================================
+// Scan Cache
+// ============================================================================
+
+export interface CachedScanResult {
+  scannedAt: string;
+  products: ProductMigrationInfo[];
+  namespaces: Record<string, string>;
+  diagnostics: MetafieldDiagnostic[];
+  counts: Record<string, number>;
+}
+
+export async function getCachedScan(
+  shopId: string,
+): Promise<CachedScanResult | null> {
+  const row = await prisma.migrationScanCache.findUnique({
+    where: { id: shopId },
+  });
+  if (!row) return null;
+  return {
+    scannedAt: row.scannedAt.toISOString(),
+    products: JSON.parse(row.productsJson) as ProductMigrationInfo[],
+    namespaces: JSON.parse(row.namespacesJson) as Record<string, string>,
+    diagnostics: JSON.parse(row.diagnosticsJson) as MetafieldDiagnostic[],
+    counts: JSON.parse(row.countsJson) as Record<string, number>,
+  };
+}
+
+export async function writeScanCache(
+  shopId: string,
+  data: {
+    products: ProductMigrationInfo[];
+    namespaces: Record<string, string>;
+    diagnostics: MetafieldDiagnostic[];
+    counts: Record<string, number>;
+  },
+): Promise<void> {
+  await prisma.migrationScanCache.upsert({
+    where: { id: shopId },
+    update: {
+      scannedAt: new Date(),
+      productsJson: JSON.stringify(data.products),
+      namespacesJson: JSON.stringify(data.namespaces),
+      diagnosticsJson: JSON.stringify(data.diagnostics),
+      countsJson: JSON.stringify(data.counts),
+    },
+    create: {
+      id: shopId,
+      scannedAt: new Date(),
+      productsJson: JSON.stringify(data.products),
+      namespacesJson: JSON.stringify(data.namespaces),
+      diagnosticsJson: JSON.stringify(data.diagnostics),
+      countsJson: JSON.stringify(data.counts),
+    },
+  });
+}
+
+export async function updateProductInCache(
+  shopId: string,
+  updatedProduct: ProductMigrationInfo,
+): Promise<void> {
+  const cached = await getCachedScan(shopId);
+  if (!cached) return;
+
+  const products = cached.products.map((p) =>
+    p.gid === updatedProduct.gid ? updatedProduct : p,
+  );
+
+  const counts: Record<string, number> = {};
+  for (const p of products) {
+    counts[p.status] = (counts[p.status] ?? 0) + 1;
+  }
+
+  await writeScanCache(shopId, {
+    products,
+    namespaces: cached.namespaces,
+    diagnostics: cached.diagnostics,
+    counts,
+  });
+}
+
+// ============================================================================
+// Category Classification
+// ============================================================================
+
+const CATEGORY_RULES: Array<{ pattern: RegExp; category: ProductCategory }> = [
+  { pattern: /330/, category: "330ml Can" },
+  { pattern: /440/, category: "440ml Can" },
+  { pattern: /750/, category: "750ml Bottle" },
+  { pattern: /375/, category: "375ml Bottle" },
+  { pattern: /\b(a2|a3|poster)\b/i, category: "Poster" },
+];
+
+export function classifyProductCategory(
+  variants: VariantInfo[],
+): ProductCategory {
+  for (const { pattern, category } of CATEGORY_RULES) {
+    if (variants.some((v) => pattern.test(v.title))) {
+      return category;
+    }
+  }
+  return "Miscellaneous";
+}
+
+// ============================================================================
+// Namespace Detection
+// ============================================================================
+
+export interface MetafieldDiagnostic {
+  namespace: string;
+  key: string;
+  value: string;
+}
+
+/**
+ * Probes variants across the store to find which namespace(s) hold
+ * `bundle_base` and `bundle_quant` metafields.
+ * Supports mixed namespaces (e.g., bundle_base in "global", bundle_quant in "custom").
+ */
+export async function detectBundleMetafieldNamespace(
+  admin: AdminApiContext,
+): Promise<{
+  namespaces: Record<string, string>;
+  diagnostics: MetafieldDiagnostic[];
+}> {
+  const diagnostics: MetafieldDiagnostic[] = [];
+
+  const response = await admin.graphql(
+    `#graphql
+      query ProbeVariantMetafields {
+        products(first: 5) {
+          nodes {
+            variants(first: 10) {
+              nodes {
+                id
+                title
+                metafields(first: 30) {
+                  nodes {
+                    namespace
+                    key
+                    value
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `,
+  );
+
+  const data: {
+    data?: {
+      products?: {
+        nodes: Array<{
+          variants: {
+            nodes: Array<{
+              id: string;
+              title: string;
+              metafields: {
+                nodes: Array<{ namespace: string; key: string; value: string }>;
+              };
+            }>;
+          };
+        }>;
+      };
+    };
+  } = await response.json();
+
+  let baseNs: string | null = null;
+  let quantNs: string | null = null;
+
+  for (const product of data.data?.products?.nodes ?? []) {
+    for (const variant of product.variants.nodes) {
+      for (const mf of variant.metafields.nodes) {
+        if (mf.key === BUNDLE_BASE_KEY) {
+          diagnostics.push({
+            namespace: mf.namespace,
+            key: mf.key,
+            value: mf.value,
+          });
+          if (!baseNs) baseNs = mf.namespace;
+        }
+        if (mf.key === BUNDLE_QUANT_KEY) {
+          diagnostics.push({
+            namespace: mf.namespace,
+            key: mf.key,
+            value: mf.value,
+          });
+          if (!quantNs) quantNs = mf.namespace;
+        }
+      }
+    }
+  }
+
+  if (baseNs) BUNDLE_BASE_NAMESPACE = baseNs;
+  if (quantNs) BUNDLE_QUANT_NAMESPACE = quantNs;
+
+  const namespaces: Record<string, string> = {};
+  if (baseNs) namespaces[BUNDLE_BASE_KEY] = baseNs;
+  if (quantNs) namespaces[BUNDLE_QUANT_KEY] = quantNs;
+
+  return { namespaces, diagnostics };
 }
 
 // ============================================================================
@@ -85,8 +301,17 @@ export async function scanProducts(
   while (hasNextPage) {
     const response = await admin.graphql(
       `#graphql
-        query GetProductsForMigration($first: Int!, $after: String) {
-          products(first: 50, after: $after) {
+        query GetProductsForMigration(
+          $first: Int!
+          $after: String
+          $baseNs: String!
+          $baseKey: String!
+          $quantNs: String!
+          $quantKey: String!
+          $childrenNs: String!
+          $childrenKey: String!
+        ) {
+          products(first: $first, after: $after) {
             pageInfo {
               hasNextPage
               endCursor
@@ -99,13 +324,13 @@ export async function scanProducts(
                   id
                   title
                   sku
-                  bundleBase: metafield(namespace: "${BUNDLE_BASE_NAMESPACE}", key: "${BUNDLE_BASE_KEY}") {
+                  bundleBase: metafield(namespace: $baseNs, key: $baseKey) {
                     value
                   }
-                  bundleQuant: metafield(namespace: "${BUNDLE_QUANT_NAMESPACE}", key: "${BUNDLE_QUANT_KEY}") {
+                  bundleQuant: metafield(namespace: $quantNs, key: $quantKey) {
                     value
                   }
-                  bundleChildren: metafield(namespace: "${ATTACHMENT_NAMESPACE}", key: "${ATTACHMENT_KEY}") {
+                  bundleChildren: metafield(namespace: $childrenNs, key: $childrenKey) {
                     value
                   }
                 }
@@ -114,7 +339,18 @@ export async function scanProducts(
           }
         }
       `,
-      { variables: { first: 50, after: cursor } },
+      {
+        variables: {
+          first: 50,
+          after: cursor,
+          baseNs: BUNDLE_BASE_NAMESPACE,
+          baseKey: BUNDLE_BASE_KEY,
+          quantNs: BUNDLE_QUANT_NAMESPACE,
+          quantKey: BUNDLE_QUANT_KEY,
+          childrenNs: ATTACHMENT_NAMESPACE,
+          childrenKey: ATTACHMENT_KEY,
+        },
+      },
     );
 
     const data: {
@@ -167,6 +403,94 @@ export async function scanProducts(
   return products;
 }
 
+/**
+ * Re-scans a single product by GID and returns updated migration info.
+ */
+export async function rescanSingleProduct(
+  admin: AdminApiContext,
+  productGid: string,
+): Promise<ProductMigrationInfo | null> {
+  const response = await admin.graphql(
+    `#graphql
+      query RescanProduct(
+        $id: ID!
+        $baseNs: String!
+        $baseKey: String!
+        $quantNs: String!
+        $quantKey: String!
+        $childrenNs: String!
+        $childrenKey: String!
+      ) {
+        product(id: $id) {
+          id
+          title
+          variants(first: 100) {
+            nodes {
+              id
+              title
+              sku
+              bundleBase: metafield(namespace: $baseNs, key: $baseKey) {
+                value
+              }
+              bundleQuant: metafield(namespace: $quantNs, key: $quantKey) {
+                value
+              }
+              bundleChildren: metafield(namespace: $childrenNs, key: $childrenKey) {
+                value
+              }
+            }
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        id: productGid,
+        baseNs: BUNDLE_BASE_NAMESPACE,
+        baseKey: BUNDLE_BASE_KEY,
+        quantNs: BUNDLE_QUANT_NAMESPACE,
+        quantKey: BUNDLE_QUANT_KEY,
+        childrenNs: ATTACHMENT_NAMESPACE,
+        childrenKey: ATTACHMENT_KEY,
+      },
+    },
+  );
+
+  const data = (await response.json()) as {
+    data?: {
+      product?: {
+        id: string;
+        title: string;
+        variants: {
+          nodes: Array<{
+            id: string;
+            title: string;
+            sku: string | null;
+            bundleBase: { value: string } | null;
+            bundleQuant: { value: string } | null;
+            bundleChildren: { value: string } | null;
+          }>;
+        };
+      };
+    };
+  };
+
+  const product = data.data?.product;
+  if (!product) return null;
+
+  const variants: VariantInfo[] = product.variants.nodes.map((v) => ({
+    gid: v.id,
+    title: v.title,
+    sku: v.sku,
+    bundleBase: v.bundleBase ? parseBooleanMetafield(v.bundleBase.value) : null,
+    bundleQuant: v.bundleQuant ? parseIntMetafield(v.bundleQuant.value) : null,
+    hasBundleChildren:
+      v.bundleChildren !== null && v.bundleChildren.value !== "[]",
+  }));
+
+  return classifyProduct(product.id, product.title, variants);
+}
+
 // ============================================================================
 // Classification
 // ============================================================================
@@ -176,6 +500,8 @@ function classifyProduct(
   title: string,
   variants: VariantInfo[],
 ): ProductMigrationInfo {
+  const category = classifyProductCategory(variants);
+
   if (variants.length <= 1) {
     return {
       gid,
@@ -184,10 +510,10 @@ function classifyProduct(
       status: "skipped",
       baseVariant: null,
       statusDetail: "Single-variant product — nothing to bundle",
+      category,
     };
   }
 
-  // Check if already migrated (any non-base variant has bundle_children)
   const nonBaseVariants = variants.filter((v) => v.bundleBase !== true);
   const migratedVariants = nonBaseVariants.filter((v) => v.hasBundleChildren);
   if (
@@ -202,6 +528,7 @@ function classifyProduct(
       status: "migrated",
       baseVariant,
       statusDetail: "All non-base variants have product relationships attached",
+      category,
     };
   }
 
@@ -219,6 +546,7 @@ function classifyProduct(
         status: "skipped",
         baseVariant: null,
         statusDetail: "No bundle metafields configured on any variant",
+        category,
       };
     }
     return {
@@ -229,6 +557,7 @@ function classifyProduct(
       baseVariant: null,
       statusDetail:
         "No variant has bundle_base=True. May be a mixed pack requiring manual setup.",
+      category,
     };
   }
 
@@ -241,12 +570,12 @@ function classifyProduct(
       status: "ambiguous",
       baseVariant: null,
       statusDetail: `Multiple base variants found: ${baseNames}`,
+      category,
     };
   }
 
   const baseVariant = baseVariants[0]!;
 
-  // Check non-base variants have bundle_quant
   const missingQuant = nonBaseVariants.filter(
     (v) => v.bundleQuant === null && v.bundleBase !== true,
   );
@@ -259,10 +588,10 @@ function classifyProduct(
       status: "missing_data",
       baseVariant,
       statusDetail: `Missing bundle_quant on: ${names}`,
+      category,
     };
   }
 
-  // Partially migrated
   if (migratedVariants.length > 0) {
     const remaining = nonBaseVariants.filter((v) => !v.hasBundleChildren);
     const names = remaining.map((v) => `"${v.title}"`).join(", ");
@@ -273,6 +602,7 @@ function classifyProduct(
       status: "ready",
       baseVariant,
       statusDetail: `Partially migrated. Remaining: ${names}`,
+      category,
     };
   }
 
@@ -283,6 +613,7 @@ function classifyProduct(
     status: "ready",
     baseVariant,
     statusDetail: `Ready to migrate. Base: "${baseVariant.title}", ${nonBaseVariants.length} variants to configure.`,
+    category,
   };
 }
 
@@ -292,11 +623,13 @@ function classifyProduct(
 
 /**
  * Migrates a single product: creates product_relationship metaobjects for each
- * non-base variant and attaches them via the bundle_children metafield.
+ * non-base variant and attaches them via the product_relationships metafield.
+ * Also creates corresponding Bundle/BundleChild rows in Prisma for inventory sync.
  */
 export async function migrateProduct(
   admin: AdminApiContext,
   product: ProductMigrationInfo,
+  shopId?: string,
 ): Promise<MigrationResult> {
   if (product.status !== "ready" || !product.baseVariant) {
     return {
@@ -329,6 +662,10 @@ export async function migrateProduct(
       created++;
     }
 
+    if (shopId) {
+      await syncBundleToPrisma(shopId, product, nonBaseVariants);
+    }
+
     return {
       productGid: product.gid,
       success: true,
@@ -346,11 +683,70 @@ export async function migrateProduct(
 }
 
 /**
+ * Creates or updates Bundle/BundleChild Prisma rows to keep the operational
+ * database in sync with the Shopify metaobject relationships.
+ */
+async function syncBundleToPrisma(
+  shopId: string,
+  product: ProductMigrationInfo,
+  nonBaseVariants: VariantInfo[],
+): Promise<void> {
+  if (!product.baseVariant) return;
+
+  await prisma.shop.upsert({
+    where: { id: shopId },
+    update: {},
+    create: { id: shopId },
+  });
+
+  for (const variant of nonBaseVariants) {
+    const quantity = variant.bundleQuant ?? 1;
+
+    await prisma.bundle.upsert({
+      where: {
+        shopId_parentGid: {
+          shopId,
+          parentGid: variant.gid,
+        },
+      },
+      update: {
+        parentTitle: `${product.title} - ${variant.title}`,
+        parentSku: variant.sku,
+        children: {
+          deleteMany: {},
+          create: [
+            {
+              childGid: product.baseVariant.gid,
+              quantity,
+            },
+          ],
+        },
+      },
+      create: {
+        shopId,
+        parentGid: variant.gid,
+        parentTitle: `${product.title} - ${variant.title}`,
+        parentSku: variant.sku,
+        children: {
+          create: [
+            {
+              childGid: product.baseVariant.gid,
+              quantity,
+            },
+          ],
+        },
+      },
+    });
+  }
+}
+
+/**
  * Migrates all "ready" products sequentially.
  */
 export async function migrateAllReady(
   admin: AdminApiContext,
   products: ProductMigrationInfo[],
+  shopId?: string,
 ): Promise<BulkMigrationSummary> {
   const readyProducts = products.filter((p) => p.status === "ready");
   const results: MigrationResult[] = [];
@@ -358,7 +754,7 @@ export async function migrateAllReady(
   let failed = 0;
 
   for (const product of readyProducts) {
-    const result = await migrateProduct(admin, product);
+    const result = await migrateProduct(admin, product, shopId);
     results.push(result);
     if (result.success) {
       migrated++;
@@ -384,6 +780,8 @@ async function createProductRelationship(
   childVariantGid: string,
   quantity: number,
 ): Promise<string> {
+  const fieldMap = await getMetaobjectFieldMap(admin);
+
   const response = await admin.graphql(
     `#graphql
       mutation CreateProductRelationship($metaobject: MetaobjectCreateInput!) {
@@ -403,8 +801,8 @@ async function createProductRelationship(
         metaobject: {
           type: METAOBJECT_TYPE,
           fields: [
-            { key: "child", value: childVariantGid },
-            { key: "quantity", value: String(quantity) },
+            { key: fieldMap.childKey, value: childVariantGid },
+            { key: fieldMap.quantityKey, value: String(quantity) },
           ],
         },
       },
@@ -491,9 +889,9 @@ async function getExistingAttachments(
 ): Promise<string[]> {
   const response = await admin.graphql(
     `#graphql
-      query GetExistingBundleChildren($id: ID!, $namespace: String!, $key: String!) {
+      query GetExistingBundleChildren($id: ID!, $ns: String!, $key: String!) {
         productVariant(id: $id) {
-          metafield(namespace: $namespace, key: $key) {
+          metafield(namespace: $ns, key: $key) {
             value
           }
         }
@@ -502,7 +900,7 @@ async function getExistingAttachments(
     {
       variables: {
         id: variantGid,
-        namespace: ATTACHMENT_NAMESPACE,
+        ns: ATTACHMENT_NAMESPACE,
         key: ATTACHMENT_KEY,
       },
     },

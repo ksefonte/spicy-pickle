@@ -109,6 +109,17 @@ model SyncLock {
   @@index([expiresAt])
 }
 
+/// Cached migration scan results per shop, stored as JSON so the migration
+/// page can reload instantly without re-querying the Shopify API on every deploy.
+model MigrationScanCache {
+  id          String   @id // shop domain
+  scannedAt   DateTime
+  productsJson String  // JSON-serialised ProductMigrationInfo[]
+  namespacesJson String // JSON-serialised Record<string, string>
+  diagnosticsJson String // JSON-serialised MetafieldDiagnostic[]
+  countsJson  String   // JSON-serialised Record<string, number>
+}
+
 /// Supplier SKU mapping for inventory cost tracking
 /// Maps Shopify variants to supplier SKUs with quantity ratios
 model SupplierSku {

@@ -2,7 +2,7 @@
  * Metaobject Setup Service
  *
  * Ensures the `product_relationship` metaobject definition and the
- * `$app:spicy_pickle.bundle_children` metafield definition exist in the store.
+ * `custom.product_relationships` metafield definition exist in the store.
  *
  * Runs on app authenticate (idempotent — safe to call on every page load).
  */
@@ -11,9 +11,16 @@ import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
 
 const METAOBJECT_TYPE = "product_relationship";
 
-const METAFIELD_NAMESPACE = "$app:spicy_pickle";
-const METAFIELD_KEY = "bundle_children";
+const METAFIELD_NAMESPACE = "custom";
+const METAFIELD_KEY = "product_relationships";
 const METAFIELD_OWNER_TYPE = "PRODUCTVARIANT";
+
+export interface MetaobjectFieldMap {
+  childKey: string;
+  quantityKey: string;
+}
+
+let cachedFieldMap: MetaobjectFieldMap | null = null;
 
 // ============================================================================
 // Public API
@@ -26,8 +33,11 @@ const METAFIELD_OWNER_TYPE = "PRODUCTVARIANT";
 export async function ensureMetaobjectSetup(
   admin: AdminApiContext,
 ): Promise<void> {
-  await ensureMetaobjectDefinition(admin);
-  await ensureMetafieldDefinition(admin);
+  const definitionGid = await ensureMetaobjectDefinition(admin);
+  if (definitionGid) {
+    await ensureMetafieldDefinition(admin, definitionGid);
+    await getMetaobjectFieldMap(admin);
+  }
 }
 
 // ============================================================================
@@ -36,10 +46,10 @@ export async function ensureMetaobjectSetup(
 
 async function ensureMetaobjectDefinition(
   admin: AdminApiContext,
-): Promise<void> {
-  const existing = await getMetaobjectDefinition(admin);
-  if (existing) {
-    return;
+): Promise<string | null> {
+  const existingGid = await getMetaobjectDefinition(admin);
+  if (existingGid) {
+    return existingGid;
   }
 
   console.log(`[Setup] Creating "${METAOBJECT_TYPE}" metaobject definition...`);
@@ -48,7 +58,7 @@ async function ensureMetaobjectDefinition(
     `#graphql
       mutation CreateProductRelationshipDefinition {
         metaobjectDefinitionCreate(definition: {
-          type: "${METAOBJECT_TYPE}"
+          type: "product_relationship"
           name: "Product Relationship"
           description: "Links a child product variant with a quantity for bundle composition"
           access: {
@@ -100,16 +110,19 @@ async function ensureMetaobjectDefinition(
       console.log(
         `[Setup] "${METAOBJECT_TYPE}" definition already exists (race condition), skipping.`,
       );
-      return;
+      return getMetaobjectDefinition(admin);
     }
     throw new Error(
       `Failed to create metaobject definition: ${JSON.stringify(errors)}`,
     );
   }
 
+  const gid =
+    data.data?.metaobjectDefinitionCreate?.metaobjectDefinition?.id ?? null;
   console.log(
-    `[Setup] Created "${METAOBJECT_TYPE}" metaobject definition: ${data.data?.metaobjectDefinitionCreate?.metaobjectDefinition?.id}`,
+    `[Setup] Created "${METAOBJECT_TYPE}" metaobject definition: ${gid}`,
   );
+  return gid;
 }
 
 async function getMetaobjectDefinition(
@@ -120,7 +133,39 @@ async function getMetaobjectDefinition(
       query GetProductRelationshipDefinition($type: String!) {
         metaobjectDefinitionByType(type: $type) {
           id
-          type
+        }
+      }
+    `,
+    { variables: { type: METAOBJECT_TYPE } },
+  );
+
+  const data: {
+    data?: {
+      metaobjectDefinitionByType?: { id: string };
+    };
+  } = await response.json();
+
+  return data.data?.metaobjectDefinitionByType?.id ?? null;
+}
+
+// ============================================================================
+// Field Map Discovery
+// ============================================================================
+
+/**
+ * Queries the live metaobject definition and returns the actual field keys
+ * for the variant reference and integer quantity fields. This handles cases
+ * where the definition was created manually with different key names.
+ */
+export async function getMetaobjectFieldMap(
+  admin: AdminApiContext,
+): Promise<MetaobjectFieldMap> {
+  if (cachedFieldMap) return cachedFieldMap;
+
+  const response = await admin.graphql(
+    `#graphql
+      query GetProductRelationshipFields($type: String!) {
+        metaobjectDefinitionByType(type: $type) {
           fieldDefinitions {
             key
             type {
@@ -133,17 +178,46 @@ async function getMetaobjectDefinition(
     { variables: { type: METAOBJECT_TYPE } },
   );
 
-  const data: {
+  const data = (await response.json()) as {
     data?: {
       metaobjectDefinitionByType?: {
-        id: string;
-        type: string;
-        fieldDefinitions: Array<{ key: string; type: { name: string } }>;
+        fieldDefinitions: Array<{
+          key: string;
+          type: { name: string };
+        }>;
       };
     };
-  } = await response.json();
+  };
 
-  return data.data?.metaobjectDefinitionByType?.id ?? null;
+  const fields = data.data?.metaobjectDefinitionByType?.fieldDefinitions ?? [];
+
+  const variantRefField = fields.find(
+    (f) => f.type.name === "variant_reference",
+  );
+  const integerField = fields.find((f) => f.type.name === "number_integer");
+
+  if (!variantRefField || !integerField) {
+    console.error(
+      "[Setup] Metaobject field definitions:",
+      JSON.stringify(fields),
+    );
+    throw new Error(
+      `product_relationship metaobject is missing expected fields. ` +
+        `Found: ${fields.map((f) => `${f.key} (${f.type.name})`).join(", ")}. ` +
+        `Need one variant_reference and one number_integer field.`,
+    );
+  }
+
+  cachedFieldMap = {
+    childKey: variantRefField.key,
+    quantityKey: integerField.key,
+  };
+
+  console.log(
+    `[Setup] Metaobject field map: child="${cachedFieldMap.childKey}", quantity="${cachedFieldMap.quantityKey}"`,
+  );
+
+  return cachedFieldMap;
 }
 
 // ============================================================================
@@ -152,6 +226,7 @@ async function getMetaobjectDefinition(
 
 async function ensureMetafieldDefinition(
   admin: AdminApiContext,
+  metaobjectDefinitionGid: string,
 ): Promise<void> {
   const existing = await getMetafieldDefinition(admin);
   if (existing) {
@@ -164,21 +239,10 @@ async function ensureMetafieldDefinition(
 
   const response = await admin.graphql(
     `#graphql
-      mutation CreateBundleChildrenMetafieldDefinition {
-        metafieldDefinitionCreate(definition: {
-          namespace: "${METAFIELD_NAMESPACE}"
-          key: "${METAFIELD_KEY}"
-          name: "Bundle Children"
-          description: "Product relationships defining this variant's bundle composition"
-          type: "list.metaobject_reference"
-          ownerType: ${METAFIELD_OWNER_TYPE}
-          validations: [
-            {
-              name: "metaobject_definition_id"
-              value: "${METAOBJECT_TYPE}"
-            }
-          ]
-        }) {
+      mutation CreateBundleChildrenMetafieldDefinition(
+        $definition: MetafieldDefinitionInput!
+      ) {
+        metafieldDefinitionCreate(definition: $definition) {
           createdDefinition {
             id
             namespace
@@ -191,6 +255,25 @@ async function ensureMetafieldDefinition(
         }
       }
     `,
+    {
+      variables: {
+        definition: {
+          namespace: METAFIELD_NAMESPACE,
+          key: METAFIELD_KEY,
+          name: "Product Relationships",
+          description:
+            "Product relationships defining this variant's bundle composition",
+          type: "list.metaobject_reference",
+          ownerType: METAFIELD_OWNER_TYPE,
+          validations: [
+            {
+              name: "metaobject_definition_id",
+              value: metaobjectDefinitionGid,
+            },
+          ],
+        },
+      },
+    },
   );
 
   const data: {
@@ -243,8 +326,6 @@ async function getMetafieldDefinition(
         ) {
           nodes {
             id
-            namespace
-            key
           }
         }
       }
@@ -261,7 +342,7 @@ async function getMetafieldDefinition(
   const data: {
     data?: {
       metafieldDefinitions?: {
-        nodes?: Array<{ id: string; namespace: string; key: string }>;
+        nodes?: Array<{ id: string }>;
       };
     };
   } = await response.json();

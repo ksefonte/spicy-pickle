@@ -21,10 +21,10 @@ Bundle (Prisma)         →  BundleChild[] (Prisma)
 
 ```
 product_relationship (Shopify Metaobject — merchant-owned, global)
-  child: variant_reference
-  quantity: number_integer
+  variant_reference field (key varies — discovered dynamically)
+  number_integer field (key varies — discovered dynamically)
         ↓ attached via
-  $app:spicy_pickle.bundle_children (list.metaobject_reference on parent variant)
+  custom.product_relationships (list.metaobject_reference on parent variant)
         ↓ cached to
   Bundle + BundleChild (Prisma) — used by inventory sync + pick list
 ```
@@ -117,14 +117,14 @@ This is merchant-owned (no `$app:` prefix), so it's globally visible in the Shop
 
 Also on app authenticate, ensure a metafield definition exists on `ProductVariant` for attaching the metaobject list:
 
-- **Namespace**: `$app:spicy_pickle` (app-reserved — only this app can write it)
-- **Key**: `bundle_children`
+- **Namespace**: `custom` (merchant-owned — created manually in Shopify admin)
+- **Key**: `product_relationships`
 - **Type**: `list.metaobject_reference` (referencing `product_relationship`)
 - **Owner type**: `PRODUCTVARIANT`
 
 Use `metafieldDefinitionCreate` GraphQL mutation with idempotent "already exists" handling.
 
-> **Ownership split**: The `product_relationship` metaobject is merchant-owned (global, any app can read/write entries). The `$app:spicy_pickle.bundle_children` metafield that attaches those metaobjects to specific variants is app-reserved (only Spicy Pickle can write the attachment).
+> **Ownership split**: Both the `product_relationship` metaobject and the `custom.product_relationships` metafield are merchant-owned. This keeps everything visible and editable in the Shopify admin. The app discovers the metaobject field keys dynamically at startup via `getMetaobjectFieldMap()` to handle definitions created manually with different field names.
 
 **File**: `app/services/metaobject-setup.server.ts`
 
@@ -136,7 +136,7 @@ Create `app/services/metaobjects.server.ts` with the following capabilities:
 
 ### 2a. Read Operations
 
-- **`getRelationshipsForVariant(admin, variantGid)`**: Query the parent variant's `$app:spicy_pickle.bundle_children` metafield, resolve the referenced metaobjects, return `Array<{ metaobjectGid, childGid, quantity }>`.
+- **`getRelationshipsForVariant(admin, variantGid)`**: Query the parent variant's `custom.product_relationships` metafield, resolve the referenced metaobjects, return `Array<{ metaobjectGid, childGid, quantity }>`.
 - **`findVariantsReferencingChild(admin, childVariantGid)`**: Query `metaobjects(type: "product_relationship")` filtered by `child == childVariantGid`, then reverse-lookup which variants reference those metaobjects. (Used for migration/admin, NOT for inventory sync hot path.)
 
 ### 2b. Write Operations
@@ -144,7 +144,7 @@ Create `app/services/metaobjects.server.ts` with the following capabilities:
 - **`createRelationship(admin, childGid, quantity)`**: Create a `product_relationship` metaobject entry. Returns the new metaobject GID.
 - **`updateRelationship(admin, metaobjectGid, { childGid?, quantity? })`**: Update an existing entry.
 - **`deleteRelationship(admin, metaobjectGid)`**: Delete an entry.
-- **`attachRelationshipsToVariant(admin, variantGid, metaobjectGids[])`**: Set the variant's `$app:spicy_pickle.bundle_children` metafield to the given list of metaobject GIDs.
+- **`attachRelationshipsToVariant(admin, variantGid, metaobjectGids[])`**: Set the variant's `custom.product_relationships` metafield to the given list of metaobject GIDs.
 - **`detachRelationshipsFromVariant(admin, variantGid)`**: Clear the metafield (remove all associations).
 
 ### 2c. Bulk Operations
@@ -296,7 +296,7 @@ Example for Pernicious Weed:
    a. Create a product_relationship metaobject entry:
       - child = base variant GID
       - quantity = this variant's bundle_quant
-   b. Attach the metaobject to this variant via $app:spicy_pickle.bundle_children metafield
+   b. Attach the metaobject to this variant via custom.product_relationships metafield
 5. Sync the created relationships to Prisma cache
 6. Mark product as migrated
 ```
@@ -365,14 +365,14 @@ Persistent error log at the bottom of the page (or expandable panel):
 
 ### 6d. Known Edge Cases
 
-| Case                                                   | Detection                                                                   | Handling                                                                                                                                                                                           |
-| ------------------------------------------------------ | --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Multiple base variants** (e.g., Pernicious Weed 6+1) | >1 variant with `bundle_base=True`                                          | Flag as "Ambiguous". The 6+1 is a cross-product bundle that can't be auto-migrated from single-product metafields. Needs manual `product_relationship` setup with children from multiple products. |
-| **Mixed packs** (e.g., Wild Rumpus)                    | 0 variants with `bundle_base=True`, or product is a known mixed pack        | Flag as "No Base". These have no single base variant — they contain children from other products. Must be configured manually via the bundle UI or Shopify admin.                                  |
-| **Subscription/activation variants**                   | `bundle_quant=1` and `bundle_base=False`                                    | Migrated as-is (creates a relationship: child=base, quantity=1). May want a "skip subscription variants" option later.                                                                             |
-| **Single-variant products**                            | Product has only 1 variant                                                  | Status "Skipped" — nothing to bundle.                                                                                                                                                              |
-| **Already migrated**                                   | Variant already has `$app:spicy_pickle.bundle_children` metafield populated | Status "Migrated" — don't re-migrate. Show existing relationships.                                                                                                                                 |
-| **Partial migration**                                  | Some variants migrated, others not                                          | Status "Partially Migrated" — show which variants still need migration.                                                                                                                            |
+| Case                                                   | Detection                                                              | Handling                                                                                                                                                                                           |
+| ------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Multiple base variants** (e.g., Pernicious Weed 6+1) | >1 variant with `bundle_base=True`                                     | Flag as "Ambiguous". The 6+1 is a cross-product bundle that can't be auto-migrated from single-product metafields. Needs manual `product_relationship` setup with children from multiple products. |
+| **Mixed packs** (e.g., Wild Rumpus)                    | 0 variants with `bundle_base=True`, or product is a known mixed pack   | Flag as "No Base". These have no single base variant — they contain children from other products. Must be configured manually via the bundle UI or Shopify admin.                                  |
+| **Subscription/activation variants**                   | `bundle_quant=1` and `bundle_base=False`                               | Migrated as-is (creates a relationship: child=base, quantity=1). May want a "skip subscription variants" option later.                                                                             |
+| **Single-variant products**                            | Product has only 1 variant                                             | Status "Skipped" — nothing to bundle.                                                                                                                                                              |
+| **Already migrated**                                   | Variant already has `custom.product_relationships` metafield populated | Status "Migrated" — don't re-migrate. Show existing relationships.                                                                                                                                 |
+| **Partial migration**                                  | Some variants migrated, others not                                     | Status "Partially Migrated" — show which variants still need migration.                                                                                                                            |
 
 ### 6e. Toggle Visibility
 
