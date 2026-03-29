@@ -183,16 +183,19 @@ export default function LocationsIndex() {
 
   const handleAddVariants = async (binId: string) => {
     const selected = await window.shopify.resourcePicker({
-      type: "variant",
+      type: "product",
       multiple: true,
+      selectionIds: [],
+      filter: { variants: true },
     });
     if (!selected || selected.length === 0) return;
-    const variantGids = selected
-      .map(
-        (s: { variants?: Array<{ id: string }>; id?: string }) =>
-          s.variants?.[0]?.id ?? s.id ?? "",
-      )
-      .filter(Boolean);
+
+    const variantGids: string[] = [];
+    for (const product of selected) {
+      for (const v of product.variants) {
+        if (v.id) variantGids.push(v.id);
+      }
+    }
     if (variantGids.length === 0) return;
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(
