@@ -34,10 +34,10 @@ The existing pick list (`picklist.server.ts` + `app.picklist._index.tsx`):
 
 Matches the current PDF format. Aggregates all line items across orders and sums by variant.
 
-| QTY | SKU         | DESC                     | LOCATION   | PICKED |
-| --- | ----------- | ------------------------ | ---------- | ------ |
-| 14  | FTCAT-440-4 | Fat Cat 4-Pack           | 01-CHCLEAR | ☐      |
-| 7   | FTCAT-440   | Fat Cat 440ml Single Can | 01-CHCLEAR | ☐      |
+| QTY | SKU         | DESC                     | AVAIL | LOCATION   | PICKED |
+| --- | ----------- | ------------------------ | ----- | ---------- | ------ |
+| 14  | FTCAT-440-4 | Fat Cat 4-Pack           | 42    | 01-CHCLEAR | ☐      |
+| 7   | FTCAT-440   | Fat Cat 440ml Single Can | 105   | 01-CHCLEAR | ☐      |
 
 Items are sorted by bin `sortOrder` (from the new `Bin` model), then by product name within each bin. Bundles with `expandOnPick = true` are expanded to their components.
 
@@ -55,10 +55,10 @@ Replaces non-base variants with their base unit equivalents using `product_relat
 
 **Resolved output:**
 
-| QTY | SKU         | DESC                             | LOCATION      | PICKED |
-| --- | ----------- | -------------------------------- | ------------- | ------ |
-| 3   | PERNI-330-6 | Pernicious Weed 6-Pack           | 07-CHBACKWALL | ☐      |
-| 29  | PERNI-330   | Pernicious Weed 330ml Single Can | 07-CHBACKWALL | ☐      |
+| QTY | SKU         | DESC                             | AVAIL | LOCATION      | PICKED |
+| --- | ----------- | -------------------------------- | ----- | ------------- | ------ |
+| 3   | PERNI-330-6 | Pernicious Weed 6-Pack           | 18    | 07-CHBACKWALL | ☐      |
+| 29  | PERNI-330   | Pernicious Weed 330ml Single Can | 312   | 07-CHBACKWALL | ☐      |
 
 **Resolution logic:**
 
@@ -69,22 +69,12 @@ Replaces non-base variants with their base unit equivalents using `product_relat
 - If the bundle has **multiple children** (mixed pack), do NOT resolve — keep as-is since the pack is its own physical item
 - The key insight: 6-packs are picked as 6-packs from the 6-pack bin. But the resolved view lets the warehouse know the total demand on base units for restocking purposes.
 
-**Actually, re-reading the user's request more carefully:**
-
-The user wants resolution to mean: "summarise as 3× 6-packs + 29× singles". This means:
-
-- **Same-product bundles** where the ordered variant has a bundle relationship are grouped by their pack size
-- The 3 6-packs stay as 6-packs (they're picked as physical 6-packs)
-- The 24-pack gets resolved to 24× singles (because it's assembled from singles)
-- Individual singles are summed
-
-Wait — the user's example says "3× pweed 6-packs (2 + 1)" and "29× pweed single cans (24+4+1)". The 6-pack base unit IS the 6-pack, so orders of 6-packs remain as 6-packs. The 24-pack's base unit is the single can (330ml), so it resolves to 24 singles. The gift pack's pweed component is 1 single.
-
-So the resolution logic is:
+**Resolution logic (confirmed):**
 
 1. For each line item, look up its `Bundle` (where `parentGid = variant GID`)
 2. If a Bundle exists, replace the line item with its children × quantities
 3. Aggregate the resolved items by variant GID
+4. Variants without a Bundle in Prisma naturally stay as-is (no resolution needed)
 
 This is essentially what `expandBundles` already does, but applied universally (not just for `expandOnPick = true` bundles).
 
@@ -100,7 +90,7 @@ This is essentially what `expandBundles` already does, but applied universally (
 
 ### New
 
-After the bin location redesign, each variant can be in one or more `Bin` entries. The `Bin` has a `sortOrder` field.
+After the bin location redesign, each variant is assigned to exactly one `Bin` (enforced at DB level). The `Bin` has a `sortOrder` field.
 
 **Sort algorithm:**
 
@@ -111,16 +101,16 @@ After the bin location redesign, each variant can be in one or more `Bin` entrie
 **Bin grouping in output:**
 
 ```
-── A1-01: Cold room loose cans ──────────────────────
-  14  FTCAT-440    Fat Cat 440ml Single Can       ☐
-   7  PERNI-330    Pernicious Weed 330ml Single   ☐
+── A1-01: Cold room loose cans ──────────────────────────────
+  14  FTCAT-440    Fat Cat 440ml Single Can      105   ☐
+   7  PERNI-330    Pernicious Weed 330ml Single  312   ☐
 
-── A1-02: Cold room 4-packs ────────────────────────
-   3  FTCAT-440-4  Fat Cat 4-Pack                 ☐
-   2  PERNI-330-4  Pernicious Weed 4-Pack         ☐
+── A1-02: Cold room 4-packs ─────────────────────────────────
+   3  FTCAT-440-4  Fat Cat 4-Pack                 42   ☐
+   2  PERNI-330-4  Pernicious Weed 4-Pack         18   ☐
 
-── (No bin assigned) ────────────────────────────────
-   1  GIFTNOTE     Personalised Gift Note         ☐
+── (No bin assigned) ─────────────────────────────────────────
+   1  GIFTNOTE     Personalised Gift Note          —   ☐
 ```
 
 ---
@@ -161,48 +151,49 @@ This matches the format from pages 6-8 of the existing PDF.
 
 ---
 
-## Shopify Admin Integration
+## Available Stock Column
 
-### Admin Action Extension
+Each pick list item will display the current "available" inventory level alongside the required quantity. This helps warehouse staff identify potential stock-outs before picking begins.
 
-Add a Shopify admin action that appears in the "More actions" menu on the Orders list page.
+### Implementation
 
-**`shopify.app.toml` addition:**
+After aggregating line items and resolving bin locations, fetch inventory levels for all variant GIDs in the pick list:
 
-```toml
-[extensions.admin_action]
-  url = "/app/picklist/generate"
+```graphql
+query GetInventoryLevels($variantIds: [ID!]!) {
+  nodes(ids: $variantIds) {
+    ... on ProductVariant {
+      id
+      inventoryItem {
+        inventoryLevels(first: 10) {
+          nodes {
+            available
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-**Or via `extensions/` directory** (Shopify CLI app extension):
+Sum `available` across all locations for each variant (or use a specific location if the shop is single-location). The result is displayed as the "AVAIL" column.
 
-```
-extensions/
-  picklist-action/
-    shopify.extension.toml
-    src/
-      ActionExtension.tsx
-```
+**Performance note:** This adds one GraphQL call per pick list generation. With ~100 variants in a typical pick list, this fits within a single `nodes()` batch query (max 250 IDs). The call is made server-side during generation, not on every page load.
 
-The extension config specifies:
+---
 
-- **Surface:** `admin.order-index.action.render` (orders list bulk action)
-- **Name:** "Generate Pick List"
+## Shopify Admin Integration (Deferred)
 
-When the user selects orders and clicks "Generate Pick List":
+### Admin Action Extension — Future Enhancement
 
-1. The extension receives the selected order GIDs
-2. It opens the app's pick list page with the order GIDs as query params
-3. The pick list page auto-generates using those specific orders
+A Shopify admin action ("Generate Pick List" in the Orders list "More actions" menu) is the ideal UX for picking orders directly from the Shopify admin. This is deferred to a later phase.
 
-**Alternative approach — App Bridge redirect:**
+**For now:** The pick list page will include:
 
-If the admin action extension is complex to set up, a simpler approach:
+1. A "Fetch Outstanding Orders" button that pulls all unfulfilled orders automatically
+2. An "Order IDs" input field where users can paste specific order names/IDs
 
-1. In the pick list page, add a "Fetch Outstanding Orders" button that pulls all unfulfilled orders automatically (no need to select from Shopify admin)
-2. Add an "Order IDs" input field where users can paste specific order names/IDs
-
-The admin action extension is the ideal UX but can be added as a Phase 2 enhancement.
+The admin action extension can be added later without changes to the core pick list logic.
 
 ---
 
@@ -267,7 +258,7 @@ The simpler approach (inline print) avoids the complexity of data transfer betwe
 **Print layout:**
 
 - Header: "Pickle Pick List — {date} — {orderCount} orders"
-- Pick list table with columns: QTY, SKU, DESC, LOCATION, PICKED (checkbox column)
+- Pick list table with columns: QTY, SKU, DESC, AVAIL, LOCATION, PICKED (checkbox column)
 - Page break before order manifest
 - Order manifest with per-order contents
 - Footer: page numbers
@@ -280,11 +271,12 @@ The simpler approach (inline print) avoids the complexity of data transfer betwe
 | ----- | -------------------------------------------------------------- | ------ | ---------------------- |
 | 1     | Update `picklist.server.ts` to use new `Bin` model for sorting | Medium | Bin Locations Redesign |
 | 2     | Add Mode 2 (base unit resolution) to pick list service         | Medium | —                      |
-| 3     | Add order manifest generation                                  | Low    | —                      |
-| 4     | Update filter options (requires_shipping, fulfilled)           | Low    | —                      |
-| 5     | Redesign pick list UI with mode toggle + new filters           | Medium | Phases 1-4             |
-| 6     | Print-optimised output                                         | Medium | Phase 5                |
-| 7     | Shopify admin action extension                                 | Medium | Phase 5                |
+| 3     | Add available stock column (inventory levels via GraphQL)      | Low    | —                      |
+| 4     | Add order manifest generation                                  | Low    | —                      |
+| 5     | Update filter options (requires_shipping, fulfilled)           | Low    | —                      |
+| 6     | Redesign pick list UI with mode toggle + new filters           | Medium | Phases 1-5             |
+| 7     | Print-optimised output                                         | Medium | Phase 6                |
+| —     | _(Deferred)_ Shopify admin action extension                    | Medium | Phase 6                |
 
 ---
 
@@ -306,6 +298,8 @@ Line Items
            ↓                        ↓
     Join with Bin (sortOrder + name)
            ↓
+    Fetch inventory levels (available) for all variants
+           ↓
     Sort by bin sortOrder → product name
            ↓
     Pick List Table + Order Manifest
@@ -322,6 +316,7 @@ interface PickListItem {
   sku: string | null;
   variantGid: string;
   quantity: number;
+  available: number | null; // current inventory level ("available" from Shopify)
   binName: string | null; // renamed from binLocation
   binSortOrder: number; // for sorting
 }

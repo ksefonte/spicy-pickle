@@ -212,7 +212,14 @@ Replace the existing **Bundles** tab with a dedicated **Product Relationships** 
 
 ### Data source
 
-The product list is fetched from Shopify GraphQL (paginated `products` query). For each product, the "configured" count comes from checking which variants have a non-empty `custom.product_relationships` metafield. This can be fetched inline with the product query or resolved client-side from the modal.
+The product list uses a **cache-on-configure** strategy:
+
+1. **Initial population**: The first visit triggers a full scan of all Shopify products via paginated GraphQL query. Results (product title, variant count, configured relationship count) are cached in a Prisma table (`ProductCache` or reuse of `MigrationScanCache`).
+2. **Cache refresh on configure**: Every time a product relationship is added, removed, or modified (via the modal editor, migration page, or any CRUD route), the affected product's cache entry is refreshed immediately by re-querying that single product from Shopify.
+3. **Page loads**: The product list reads from the cache (instant), never from Shopify directly.
+4. **Manual rescan**: A "Rescan All" button forces a full refresh if needed (e.g., after bulk Shopify admin changes).
+
+This approach gives fast page loads for the common case (browsing/managing relationships) while keeping the cache current since configuration changes are infrequent (once or twice a week). The pick list continues to read from Prisma `Bundle`/`BundleChild` and is unaffected.
 
 ### Migration page relationship
 
@@ -227,6 +234,21 @@ Once the Product Relationships page is live:
 - Remove the old Bundles routes (`app.bundles.*`)
 - Update navigation: replace "Bundles" with "Product Relationships"
 - The Quick Setup and Import routes can be kept as sub-routes under the new page if still needed, or consolidated into the modal workflow
+
+---
+
+## Cross-Plan Development Order
+
+The following order optimises for dependency resolution — each section builds on the previous:
+
+| Order | Plan                           | Rationale                                                                                                                                                                                                                          |
+| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1** | **Sync Configuration**         | Schema changes (`Shop.syncEnabled`, `Bundle.syncEnabled`) are small and foundational. Having guard logic in place means everything built after this point is safe to deploy without interfering with the existing external syncer. |
+| **2** | **Bin Locations**              | New `Bin` + `BinVariant` schema is needed by the pick list. The route rewrites are self-contained. Dropping the old `BinLocation` table cleans up the schema for all subsequent work.                                              |
+| **3** | **Pick List Redesign**         | Depends on the new `Bin` model for sort-order-based grouping. Also benefits from sync config being in place (can show sync status in the UI).                                                                                      |
+| **4** | **Product Relationships Page** | Reuses the existing migration modal and CRUD functions. Building this last means all other features (sync toggles, bin display) can be integrated into the page from the start.                                                    |
+
+All four plans share the same Prisma migration — the schema changes from plans 1 and 2 can be combined into a single migration that adds `syncEnabled` fields, creates `Bin`/`BinVariant`, and drops `BinLocation`.
 
 ---
 

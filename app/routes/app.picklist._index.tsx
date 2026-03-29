@@ -24,7 +24,6 @@ interface ActionData {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
 
-  // Default to today for date filters
   const today = new Date();
   const thirtyDaysAgo = new Date(today);
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -47,9 +46,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const endDateStr = formData.get("endDate") as string | null;
     const includeUnfulfilled = formData.get("unfulfilled") === "true";
     const includePartial = formData.get("partial") === "true";
-    const sortBy = (formData.get("sortBy") as SortField) ?? "binLocation";
+    const sortBy = (formData.get("sortBy") as SortField) ?? "bin";
     const sortDirection =
       (formData.get("sortDirection") as SortDirection) ?? "asc";
+    const mode =
+      (formData.get("mode") as "standard" | "resolved") ?? "standard";
+    const requiresShippingStr = formData.get("requiresShipping");
+    const requiresShipping =
+      requiresShippingStr === "true"
+        ? true
+        : requiresShippingStr === "false"
+          ? false
+          : undefined;
 
     const statuses: ("unfulfilled" | "partially_fulfilled")[] = [];
     if (includeUnfulfilled) statuses.push("unfulfilled");
@@ -67,9 +75,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           startDate: startDateStr ? new Date(startDateStr) : undefined,
           endDate: endDateStr ? new Date(endDateStr) : undefined,
           statuses,
+          requiresShipping,
         },
         sortBy,
         sortDirection,
+        mode,
       );
 
       return { pickList } as ActionData;
@@ -107,8 +117,10 @@ export default function PickListIndex() {
   const [endDate, setEndDate] = useState(defaultEndDate);
   const [includeUnfulfilled, setIncludeUnfulfilled] = useState(true);
   const [includePartial, setIncludePartial] = useState(true);
-  const [sortBy, setSortBy] = useState<SortField>("binLocation");
+  const [sortBy, setSortBy] = useState<SortField>("bin");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [mode, setMode] = useState<"standard" | "resolved">("standard");
+  const [requiresShipping, setRequiresShipping] = useState(true);
 
   const isLoading =
     fetcher.state === "submitting" || fetcher.state === "loading";
@@ -125,6 +137,8 @@ export default function PickListIndex() {
     formData.set("partial", String(includePartial));
     formData.set("sortBy", sortBy);
     formData.set("sortDirection", sortDirection);
+    formData.set("mode", mode);
+    formData.set("requiresShipping", String(requiresShipping));
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(formData, { method: "POST" });
   };
@@ -215,9 +229,28 @@ export default function PickListIndex() {
                 setIncludePartial(target.checked);
               }}
             />
+            <s-checkbox
+              label="Requires shipping only"
+              checked={requiresShipping}
+              onChange={(e: Event) => {
+                const target = e.target as HTMLInputElement;
+                setRequiresShipping(target.checked);
+              }}
+            />
           </s-stack>
 
           <s-stack direction="inline" gap="base">
+            <s-select
+              label="Mode"
+              value={mode}
+              onChange={(e: Event) => {
+                const target = e.target as HTMLSelectElement;
+                setMode(target.value as "standard" | "resolved");
+              }}
+            >
+              <option value="standard">Standard</option>
+              <option value="resolved">Base Unit Resolution</option>
+            </s-select>
             <s-select
               label="Sort by"
               value={sortBy}
@@ -226,7 +259,7 @@ export default function PickListIndex() {
                 setSortBy(target.value as SortField);
               }}
             >
-              <option value="binLocation">Bin Location</option>
+              <option value="bin">Bin Location</option>
               <option value="product">Product</option>
               <option value="quantity">Quantity</option>
             </s-select>
@@ -269,6 +302,7 @@ export default function PickListIndex() {
                 unique item
                 {pickList.items.length !== 1 ? "s" : ""} • {pickList.totalItems}{" "}
                 total units
+                {pickList.mode === "resolved" ? " • Resolved mode" : ""}
               </s-paragraph>
               <s-stack direction="inline" gap="small">
                 <s-button variant="secondary" onClick={handleExport}>
@@ -288,70 +322,118 @@ export default function PickListIndex() {
                 </s-paragraph>
               </s-box>
             ) : (
-              <div className="pick-list-table">
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr
-                      style={{
-                        borderBottom: "2px solid var(--p-border-subdued)",
-                      }}
-                    >
-                      <th style={{ textAlign: "left", padding: "8px" }}>
-                        Bin Location
-                      </th>
-                      <th style={{ textAlign: "left", padding: "8px" }}>
-                        Product
-                      </th>
-                      <th style={{ textAlign: "left", padding: "8px" }}>
-                        Variant
-                      </th>
-                      <th style={{ textAlign: "left", padding: "8px" }}>SKU</th>
-                      <th style={{ textAlign: "right", padding: "8px" }}>
-                        Quantity
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pickList.items.map((item, index) => (
+              <div className="pick-list-print-area">
+                <div className="pick-list-table">
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
                       <tr
-                        key={`${item.variantGid}-${index}`}
                         style={{
-                          borderBottom: "1px solid var(--p-border-subdued)",
+                          borderBottom: "2px solid var(--p-border-subdued)",
                         }}
                       >
-                        <td
-                          style={{
-                            padding: "8px",
-                            fontWeight: "bold",
-                            fontFamily: "monospace",
-                          }}
-                        >
-                          {item.binLocation ?? "—"}
-                        </td>
-                        <td style={{ padding: "8px" }}>{item.productTitle}</td>
-                        <td style={{ padding: "8px" }}>{item.variantTitle}</td>
-                        <td
-                          style={{
-                            padding: "8px",
-                            fontFamily: "monospace",
-                            color: "var(--p-text-subdued)",
-                          }}
-                        >
-                          {item.sku ?? "—"}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px",
-                            textAlign: "right",
-                            fontWeight: "bold",
-                          }}
-                        >
-                          {item.quantity}
-                        </td>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Bin
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Product
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Variant
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          SKU
+                        </th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>
+                          Avail
+                        </th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>
+                          Quantity
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {pickList.items.map((item, index) => (
+                        <tr
+                          key={`${item.variantGid}-${index}`}
+                          style={{
+                            borderBottom: "1px solid var(--p-border-subdued)",
+                          }}
+                        >
+                          <td
+                            style={{
+                              padding: "8px",
+                              fontWeight: "bold",
+                              fontFamily: "monospace",
+                            }}
+                          >
+                            {item.binName ?? "—"}
+                          </td>
+                          <td style={{ padding: "8px" }}>
+                            {item.productTitle}
+                          </td>
+                          <td style={{ padding: "8px" }}>
+                            {item.variantTitle}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              fontFamily: "monospace",
+                              color: "var(--p-text-subdued)",
+                            }}
+                          >
+                            {item.sku ?? "—"}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              color: "var(--p-text-subdued)",
+                            }}
+                          >
+                            {item.available ?? "—"}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              fontWeight: "bold",
+                            }}
+                          >
+                            {item.quantity}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {pickList.orders.length > 0 && (
+                  <div className="order-manifest" style={{ marginTop: "24px" }}>
+                    <h3 style={{ marginBottom: "12px" }}>
+                      Order Manifest ({pickList.orders.length} order
+                      {pickList.orders.length !== 1 ? "s" : ""})
+                    </h3>
+                    <pre
+                      style={{
+                        fontFamily: "monospace",
+                        fontSize: "12px",
+                        whiteSpace: "pre-wrap",
+                        lineHeight: "1.5",
+                      }}
+                    >
+                      {pickList.orders
+                        .map(
+                          (order) =>
+                            `${order.name}:\n${order.lineItems
+                              .map(
+                                (li) => `  ${li.quantity}× ${li.description}`,
+                              )
+                              .join("\n")}`,
+                        )
+                        .join("\n\n")}
+                    </pre>
+                  </div>
+                )}
               </div>
             )}
           </s-stack>
@@ -368,6 +450,10 @@ export default function PickListIndex() {
             <s-text type="strong">Bundle expansion:</s-text> Bundles marked with
             &quot;Expand on pick&quot; will be broken down into their component
             items.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Base Unit Resolution:</s-text> Expands ALL
+            bundles to their base components for a fully resolved pick list.
           </s-paragraph>
         </s-stack>
       </s-section>
@@ -391,13 +477,19 @@ export default function PickListIndex() {
 
       <style>{`
         @media print {
-          s-page > *:not(.pick-list-table),
+          s-page > *:not(.pick-list-print-area),
           s-section[slot="aside"],
           s-button {
             display: none !important;
           }
-          .pick-list-table {
+          .pick-list-print-area {
             font-size: 12pt;
+          }
+          .pick-list-table {
+            page-break-after: auto;
+          }
+          .order-manifest {
+            page-break-before: auto;
           }
         }
       `}</style>

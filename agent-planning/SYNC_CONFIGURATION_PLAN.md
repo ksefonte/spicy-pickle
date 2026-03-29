@@ -21,34 +21,12 @@ model Shop {
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
   lastMetaobjectSyncAt DateTime?
-  syncEnabled          Boolean       @default(false)  // NEW: global sync toggle
+  syncEnabled          Boolean       @default(false)  // Global sync toggle
   bundles              Bundle[]
-  binLocations         BinLocation[]
+  bins                 Bin[]
   supplierSkus         SupplierSku[]
 }
-
-model SyncExclusion {
-  id         String   @id @default(cuid())
-  shopId     String
-  variantGid String   // variant GID excluded from sync
-  createdAt  DateTime @default(now())
-
-  @@unique([shopId, variantGid])
-  @@index([shopId])
-}
 ```
-
-**Design decision — exclusion list vs inclusion list:**
-
-An **exclusion** list (sync all by default, exclude specific variants) is the right model because:
-
-- When global sync is first enabled, the expected default is "sync everything"
-- The exclusion list starts empty and only grows if the user wants to carve out exceptions
-- Fewer rows to manage since most variants should sync
-
-However, during the rollout phase (testing product by product), the user likely wants the inverse: "sync nothing by default, only sync these specific variants." Rather than flipping the model, we support this with a **per-variant "sync enabled" flag on the Bundle level**, since syncing only applies to variants that are parents of bundles.
-
-**Revised approach — add `syncEnabled` to Bundle:**
 
 ```prisma
 model Bundle {

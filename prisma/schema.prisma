@@ -48,8 +48,9 @@ model Shop {
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
   lastMetaobjectSyncAt DateTime?
+  syncEnabled          Boolean       @default(false) // Global inventory sync toggle
   bundles              Bundle[]
-  binLocations         BinLocation[]
+  bins                 Bin[]
   supplierSkus         SupplierSku[]
 }
 
@@ -66,6 +67,7 @@ model Bundle {
   updatedAt    DateTime      @updatedAt
   children     BundleChild[]
   expandOnPick Boolean       @default(false) // If true, expand to components in pick list
+  syncEnabled  Boolean       @default(false) // Per-bundle inventory sync toggle
 
   @@unique([shopId, parentGid])
   @@index([shopId])
@@ -84,18 +86,34 @@ model BundleChild {
   @@index([childGid])
 }
 
-/// Bin/location mapping for warehouse picking
-model BinLocation {
+/// A named physical bin/location in the warehouse
+model Bin {
+  id          String       @id @default(cuid())
+  shopId      String
+  shop        Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String       // Short label: "A1-03", "Cold Room", "Poster Shelf"
+  description String?
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  variants    BinVariant[]
+
+  @@unique([shopId, name])
+  @@index([shopId])
+}
+
+/// A variant assigned to a bin (one bin per variant per shop, enforced at DB level)
+model BinVariant {
   id         String   @id @default(cuid())
-  shopId     String
-  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  binId      String
+  bin        Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+  shopId     String   // Denormalized from Bin for unique constraint
   variantGid String   // Shopify Product Variant GID
-  location   String   // Free-form bin location string (e.g., "A1-03", "Cold Room Shelf 2")
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
 
   @@unique([shopId, variantGid])
-  @@index([shopId])
+  @@unique([binId, variantGid])
+  @@index([variantGid])
 }
 
 /// Sync lock for idempotency during inventory webhook processing

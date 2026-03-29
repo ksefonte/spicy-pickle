@@ -19,6 +19,7 @@ export interface PickListFilters {
   endDate?: Date;
   statuses: ("unfulfilled" | "partially_fulfilled")[];
   orderIds?: string[]; // For manual selection
+  requiresShipping?: boolean;
 }
 
 export interface OrderLineItem {
@@ -35,7 +36,17 @@ export interface PickListItem {
   sku: string | null;
   variantGid: string;
   quantity: number;
-  binLocation: string | null;
+  binName: string | null;
+  binSortOrder: number;
+  available: number | null;
+}
+
+export interface OrderSummary {
+  name: string;
+  lineItems: Array<{
+    quantity: number;
+    description: string;
+  }>;
 }
 
 export interface PickListResult {
@@ -43,9 +54,11 @@ export interface PickListResult {
   orderCount: number;
   totalItems: number;
   generatedAt: Date;
+  orders: OrderSummary[];
+  mode: "standard" | "resolved";
 }
 
-export type SortField = "binLocation" | "product" | "quantity";
+export type SortField = "bin" | "product" | "quantity";
 export type SortDirection = "asc" | "desc";
 
 // GraphQL response types
@@ -60,6 +73,7 @@ interface OrdersQueryResult {
     lineItems?: {
       nodes?: Array<{
         quantity: number;
+        requiresShipping: boolean;
         variant?: {
           id: string;
           title: string;
@@ -104,52 +118,52 @@ interface VariantsQueryResult {
 export async function generatePickList(
   admin: AdminApiContext,
   filters: PickListFilters,
-  sortBy: SortField = "binLocation",
+  sortBy: SortField = "bin",
   sortDirection: SortDirection = "asc",
+  mode: "standard" | "resolved" = "standard",
 ): Promise<PickListResult> {
-  // Fetch orders matching filters
-  const orders = await fetchOrders(admin, filters);
-
-  // Collect all line items
-  const lineItems: OrderLineItem[] = [];
-  for (const order of orders) {
-    lineItems.push(...order.lineItems);
-  }
-
-  // Expand bundles where expandOnPick is true
-  const expandedItems = await expandBundles(admin, filters.shop, lineItems);
-
-  // Aggregate by variant
+  const { orders, lineItems, orderSummaries } = await fetchOrdersWithSummaries(
+    admin,
+    filters,
+  );
+  const expandedItems = await expandBundles(
+    admin,
+    filters.shop,
+    lineItems,
+    mode,
+  );
   const aggregated = aggregateItems(expandedItems);
-
-  // Add bin locations
-  const itemsWithLocations = await addBinLocations(filters.shop, aggregated);
-
-  // Sort items
-  const sortedItems = sortItems(itemsWithLocations, sortBy, sortDirection);
-
+  const itemsWithBins = await addBinInfo(filters.shop, aggregated);
+  const itemsWithInventory = await addInventoryLevels(admin, itemsWithBins);
+  const sortedItems = sortItems(itemsWithInventory, sortBy, sortDirection);
   return {
     items: sortedItems,
     orderCount: orders.length,
     totalItems: sortedItems.reduce((sum, item) => sum + item.quantity, 0),
     generatedAt: new Date(),
+    orders: orderSummaries,
+    mode,
   };
 }
 
 /**
- * Fetches orders matching the given filters from Shopify.
+ * Fetches orders matching the given filters from Shopify and builds order summaries.
  */
-async function fetchOrders(
+async function fetchOrdersWithSummaries(
   admin: AdminApiContext,
   filters: PickListFilters,
-): Promise<Array<{ id: string; name: string; lineItems: OrderLineItem[] }>> {
+): Promise<{
+  orders: Array<{ id: string; name: string; lineItems: OrderLineItem[] }>;
+  lineItems: OrderLineItem[];
+  orderSummaries: OrderSummary[];
+}> {
   const orders: Array<{
     id: string;
     name: string;
     lineItems: OrderLineItem[];
   }> = [];
+  const orderSummaries: OrderSummary[] = [];
 
-  // Build query string
   const queryParts: string[] = [];
 
   if (filters.statuses.includes("unfulfilled")) {
@@ -189,6 +203,7 @@ async function fetchOrders(
               lineItems(first: 100) {
                 nodes {
                   quantity
+                  requiresShipping
                   variant {
                     id
                     title
@@ -220,59 +235,90 @@ async function fetchOrders(
     if (!ordersData) break;
 
     for (const order of ordersData.nodes ?? []) {
-      // If specific order IDs are provided, filter
       if (filters.orderIds && !filters.orderIds.includes(order.id)) {
         continue;
       }
 
       const lineItems: OrderLineItem[] = [];
+      const summaryLineItems: OrderSummary["lineItems"] = [];
 
       for (const lineItem of order.lineItems?.nodes ?? []) {
         if (!lineItem.variant) continue;
 
+        if (
+          filters.requiresShipping !== undefined &&
+          lineItem.requiresShipping !== filters.requiresShipping
+        ) {
+          continue;
+        }
+
+        const productTitle =
+          lineItem.variant.product?.title ?? "Unknown Product";
+        const variantTitle = lineItem.variant.title ?? "Default";
+        const sku = lineItem.variant.sku ?? null;
+
         lineItems.push({
           variantGid: lineItem.variant.id,
-          productTitle: lineItem.variant.product?.title ?? "Unknown Product",
-          variantTitle: lineItem.variant.title ?? "Default",
-          sku: lineItem.variant.sku ?? null,
+          productTitle,
+          variantTitle,
+          sku,
           quantity: lineItem.quantity,
+        });
+
+        const skuSuffix = sku ? ` (${sku})` : "";
+        summaryLineItems.push({
+          quantity: lineItem.quantity,
+          description: `${productTitle} - ${variantTitle}${skuSuffix}`,
         });
       }
 
-      orders.push({
-        id: order.id,
-        name: order.name,
-        lineItems,
-      });
+      if (lineItems.length > 0) {
+        orders.push({
+          id: order.id,
+          name: order.name,
+          lineItems,
+        });
+        orderSummaries.push({
+          name: order.name,
+          lineItems: summaryLineItems,
+        });
+      }
     }
 
     hasNextPage = ordersData.pageInfo?.hasNextPage ?? false;
     cursor = ordersData.pageInfo?.endCursor ?? null;
   }
 
-  return orders;
+  const allLineItems: OrderLineItem[] = [];
+  for (const order of orders) {
+    allLineItems.push(...order.lineItems);
+  }
+
+  return { orders, lineItems: allLineItems, orderSummaries };
 }
 
 /**
- * Expands bundles with expandOnPick=true to their component variants.
+ * Expands bundles to their component variants.
+ * In "standard" mode, only bundles with expandOnPick=true are expanded.
+ * In "resolved" mode, ALL bundles are expanded.
  */
 async function expandBundles(
   admin: AdminApiContext,
   shop: string,
   lineItems: OrderLineItem[],
+  mode: "standard" | "resolved" = "standard",
 ): Promise<OrderLineItem[]> {
   const result: OrderLineItem[] = [];
 
-  // Get all variant GIDs
   const variantGids = [...new Set(lineItems.map((item) => item.variantGid))];
 
-  // Find bundles where these variants are the parent and expandOnPick is true
+  const whereClause =
+    mode === "resolved"
+      ? { shopId: shop, parentGid: { in: variantGids } }
+      : { shopId: shop, parentGid: { in: variantGids }, expandOnPick: true };
+
   const expandableBundles = await db.bundle.findMany({
-    where: {
-      shopId: shop,
-      parentGid: { in: variantGids },
-      expandOnPick: true,
-    },
+    where: whereClause,
     include: {
       children: true,
     },
@@ -389,26 +435,82 @@ export function aggregateItems(items: OrderLineItem[]): OrderLineItem[] {
 }
 
 /**
- * Adds bin locations to aggregated items.
+ * Adds bin name and sort order to aggregated items via BinVariant → Bin.
  */
-async function addBinLocations(
+async function addBinInfo(
   shop: string,
   items: OrderLineItem[],
 ): Promise<PickListItem[]> {
   const variantGids = items.map((item) => item.variantGid);
 
-  const locations = await db.binLocation.findMany({
+  const binVariants = await db.binVariant.findMany({
     where: {
       shopId: shop,
       variantGid: { in: variantGids },
     },
+    include: { bin: true },
   });
 
-  const locationMap = new Map(locations.map((l) => [l.variantGid, l.location]));
+  const binMap = new Map(
+    binVariants.map((bv) => [
+      bv.variantGid,
+      { name: bv.bin.name, sortOrder: bv.bin.sortOrder },
+    ]),
+  );
+
+  return items.map((item) => {
+    const bin = binMap.get(item.variantGid);
+    return {
+      ...item,
+      binName: bin?.name ?? null,
+      binSortOrder: bin?.sortOrder ?? Number.MAX_SAFE_INTEGER,
+      available: null,
+    };
+  });
+}
+
+/**
+ * Fetches available inventory for all variant GIDs via the Admin API.
+ */
+async function addInventoryLevels(
+  admin: AdminApiContext,
+  items: PickListItem[],
+): Promise<PickListItem[]> {
+  const variantGids = items.map((i) => i.variantGid);
+  if (variantGids.length === 0) return items;
+
+  const batchSize = 250;
+  const levelMap = new Map<string, number>();
+
+  for (let i = 0; i < variantGids.length; i += batchSize) {
+    const batch = variantGids.slice(i, i + batchSize);
+    const response: Response = await admin.graphql(
+      `#graphql
+        query getVariantInventory($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              inventoryQuantity
+            }
+          }
+        }
+      `,
+      { variables: { ids: batch } },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const data: {
+      data?: { nodes?: Array<{ id?: string; inventoryQuantity?: number }> };
+    } = await response.json();
+    for (const node of data.data?.nodes ?? []) {
+      if (node?.id != null && node?.inventoryQuantity != null) {
+        levelMap.set(node.id, node.inventoryQuantity);
+      }
+    }
+  }
 
   return items.map((item) => ({
     ...item,
-    binLocation: locationMap.get(item.variantGid) ?? null,
+    available: levelMap.get(item.variantGid) ?? null,
   }));
 }
 
@@ -424,12 +526,15 @@ export function sortItems(
 
   return [...items].sort((a, b) => {
     switch (sortBy) {
-      case "binLocation": {
-        // Null bin locations go to the end
-        if (!a.binLocation && !b.binLocation) return 0;
-        if (!a.binLocation) return 1;
-        if (!b.binLocation) return -1;
-        return multiplier * a.binLocation.localeCompare(b.binLocation);
+      case "bin": {
+        const aHasBin = a.binName != null;
+        const bHasBin = b.binName != null;
+        if (!aHasBin && !bHasBin) return 0;
+        if (!aHasBin) return 1;
+        if (!bHasBin) return -1;
+        const orderDiff = a.binSortOrder - b.binSortOrder;
+        if (orderDiff !== 0) return multiplier * orderDiff;
+        return multiplier * a.productTitle.localeCompare(b.productTitle);
       }
       case "product": {
         const productCompare = a.productTitle.localeCompare(b.productTitle);
@@ -449,13 +554,14 @@ export function sortItems(
  * Exports pick list to CSV format.
  */
 export function exportToCSV(items: PickListItem[]): string {
-  const headers = ["Product", "Variant", "SKU", "Quantity", "Bin Location"];
+  const headers = ["Product", "Variant", "SKU", "Available", "Quantity", "Bin"];
   const rows = items.map((item) => [
     escapeCSV(item.productTitle),
     escapeCSV(item.variantTitle),
     escapeCSV(item.sku ?? ""),
+    item.available != null ? String(item.available) : "",
     String(item.quantity),
-    escapeCSV(item.binLocation ?? ""),
+    escapeCSV(item.binName ?? ""),
   ]);
 
   return [headers.join(","), ...rows.map((row) => row.join(","))].join("\n");

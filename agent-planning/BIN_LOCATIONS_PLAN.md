@@ -47,25 +47,27 @@ model Bin {
   @@index([shopId])
 }
 
-/// A variant assigned to a bin (one bin per variant per shop)
+/// A variant assigned to a bin (one bin per variant per shop, enforced at DB level)
 model BinVariant {
   id         String   @id @default(cuid())
   binId      String
   bin        Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+  shopId     String   // Denormalized from Bin for unique constraint
   variantGid String   // Shopify Product Variant GID
   createdAt  DateTime @default(now())
 
-  @@unique([binId, variantGid])
+  @@unique([shopId, variantGid])  // DB-level: one bin per variant per shop
+  @@unique([binId, variantGid])   // Prevents duplicate within same bin
   @@index([variantGid])
 }
 ```
 
 **Key design decisions:**
 
-1. **One bin per variant**: Each variant belongs to exactly one bin. This makes pick list reporting unambiguous — there's a single definitive location for each item. For products where all variants live together, assign them all to one bin. For products where singles and packs are stored separately (e.g., loose cans in Bin 4, 6-packs in Bin 5), assign those specific variants to different bins. If a variant is moved to a new bin, it's removed from the old one automatically.
-2. **Bin as first-class entity**: Has its own name, description, sort order
+1. **One bin per variant (DB-enforced)**: The `@@unique([shopId, variantGid])` constraint on `BinVariant` guarantees at the database level that a variant can only exist in one bin per shop. The `shopId` field is denormalized from the parent `Bin` to make this constraint possible. When a variant is assigned to a new bin, the app deletes the old `BinVariant` row first (or uses an upsert pattern). This makes pick list reporting unambiguous — there's a single definitive location for each item. For products where all variants live together, assign them all to one bin. For products where singles and packs are stored separately (e.g., loose cans in Bin 4, 6-packs in Bin 5), assign those specific variants to different bins.
+2. **Bin as first-class entity**: Has its own name, description, sort order.
 3. **Sort order**: Integer field for reordering in the UI. This directly feeds into pick list sorting — items are sorted by their bin's `sortOrder`, not alphabetically.
-4. **Replaced `BinLocation`**: The old model is superseded. Migration will convert existing data.
+4. **Drop `BinLocation` table**: The old model is deleted entirely in the same migration (no transition period needed since there is no meaningful data in the current database).
 
 ### Relationship to Shop
 
@@ -80,12 +82,13 @@ model Shop {
 
 ### Migration from BinLocation → Bin + BinVariant
 
-For each unique `location` string in the existing `BinLocation` table:
+No data migration needed — the `BinLocation` table contains no meaningful data at this stage. The Prisma migration will:
 
-1. Create a `Bin` with `name = location`
-2. For each `BinLocation` row with that location string, create a `BinVariant` linking the variant to the new bin
+1. Create the `Bin` and `BinVariant` tables
+2. Drop the `BinLocation` table
+3. Remove the `binLocations` relation from `Shop`
 
-After migration, the `BinLocation` table can be dropped.
+This is a clean replacement, not a data migration.
 
 ---
 
@@ -189,28 +192,37 @@ In the product detail modal on the Migration page:
 
 ## Metafield Sync
 
-The existing `syncBinLocationMetafield` writes a `spicy_pickle.bin_location` string metafield per variant. With the new model:
+The existing `syncBinLocationMetafield` writes a `spicy_pickle.bin_location` string metafield per variant. With the new one-bin-per-variant model, this metafield can continue to hold a single bin name string if needed.
 
-- A variant can be in multiple bins
-- The metafield value could be updated to a comma-separated list of bin names, or a JSON array
-- Or deprecated in favour of reading from Prisma (the pick list already reads from DB)
-
-**Recommendation:** Keep metafield sync as a secondary concern. The pick list and stock visualiser will read from Prisma. The metafield sync can be updated later to write a JSON list if external systems need it.
+**Recommendation:** Keep metafield sync as a secondary concern. The pick list and stock visualiser will read from Prisma. The `syncBinLocationMetafield` / `deleteBinLocationMetafield` functions in `metafields.server.ts` can be updated later to write the new `Bin.name` value, or deprecated entirely if no external system reads the metafield.
 
 ---
 
+## Route Migration (BinLocation → Bin + BinVariant)
+
+Files that reference the old `BinLocation` model and need updating:
+
+| File                                  | Current Usage                                                                             | Migration Action                                                                                    |
+| ------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `prisma/schema.prisma`                | `BinLocation` model, `Shop.binLocations` relation                                         | Drop `BinLocation`, remove relation, add `Bin` + `BinVariant` + `Shop.bins`                         |
+| `app/routes/app.locations._index.tsx` | CRUD on `db.binLocation`, calls `syncBinLocationMetafield` / `deleteBinLocationMetafield` | **Full rewrite** to new bin-card UI using `Bin` + `BinVariant`                                      |
+| `app/routes/app.locations.import.tsx` | CSV import writing `db.binLocation.upsert`                                                | **Rewrite** to create `Bin` entries from unique locations and `BinVariant` entries for each variant |
+| `app/services/metafields.server.ts`   | `syncBinLocationMetafield`, `deleteBinLocationMetafield`                                  | Keep for now (metafield sync is a secondary concern); update to write `Bin.name` later              |
+| `app/services/picklist.server.ts`     | `db.binLocation.findMany` in `addBinLocations()`, `binLocation` field on `PickListItem`   | **Update** to join through `BinVariant` → `Bin`, rename field to `binName`, add `binSortOrder`      |
+| `app/routes/app.picklist._index.tsx`  | Displays `item.binLocation`, sorts by `"binLocation"`                                     | **Update** to use `binName`, `binSortOrder`                                                         |
+| `app/routes/api.debug.tsx`            | `db.binLocation.count()`                                                                  | **Update** to `db.bin.count()` and `db.binVariant.count()`                                          |
+
 ## Implementation Phases
 
-| Phase | Task                                                                  | Effort |
-| ----- | --------------------------------------------------------------------- | ------ |
-| 1     | Schema: create `Bin` + `BinVariant` models, migrate                   | Low    |
-| 2     | Data migration: convert existing `BinLocation` → `Bin` + `BinVariant` | Low    |
-| 3     | Bin CRUD: create/edit/delete bins with name + description             | Medium |
-| 4     | Variant assignment: add/remove variants with resource picker          | Medium |
-| 5     | Reordering: sortOrder management with up/down arrows                  | Low    |
-| 6     | Product-level add: "Add all variants from product" flow               | Low    |
-| 7     | Pick list integration: update pick list to use new Bin model          | Medium |
-| 8     | (Optional) Metafield sync update                                      | Low    |
+| Phase | Task                                                             | Effort |
+| ----- | ---------------------------------------------------------------- | ------ |
+| 1     | Schema: create `Bin` + `BinVariant`, drop `BinLocation`, migrate | Low    |
+| 2     | Bin CRUD: create/edit/delete bins with name + description        | Medium |
+| 3     | Variant assignment: add/remove variants with resource picker     | Medium |
+| 4     | Reordering: sortOrder management with up/down arrows             | Low    |
+| 5     | Product-level add: "Add all variants from product" flow          | Low    |
+| 6     | Pick list integration: update pick list to use new Bin model     | Medium |
+| 7     | (Optional) Metafield sync update                                 | Low    |
 
 ---
 
