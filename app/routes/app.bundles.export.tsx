@@ -6,7 +6,7 @@ import db from "../db.server";
 /**
  * Export bundles as CSV
  *
- * Format: name,parent_gid,child_gid,quantity,expand_on_pick
+ * Format: parent_gid,parent_name,parent_sku,child_gid,child_name,quantity,expand_on_pick
  *
  * Each bundle-child relationship is a separate row.
  * Multiple rows with the same parent_gid represent one bundle with multiple children.
@@ -19,23 +19,39 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const bundles = await db.bundle.findMany({
     where: { shopId: shop },
     include: { children: true },
-    orderBy: { name: "asc" },
+    orderBy: { createdAt: "asc" },
   });
 
-  // Collect all variant GIDs for title lookup
+  // Collect all variant GIDs for title lookup (for children and parents without cached titles)
   const allGids = new Set<string>();
   for (const bundle of bundles) {
-    allGids.add(bundle.parentGid);
+    if (!bundle.parentTitle) {
+      allGids.add(bundle.parentGid);
+    }
     for (const child of bundle.children) {
       allGids.add(child.childGid);
     }
   }
 
-  // Fetch variant titles from Shopify
-  const variantTitles: Record<string, string> = {};
+  // Fetch variant info from Shopify
+  interface VariantInfo {
+    title: string;
+    sku: string;
+  }
+  const variantInfo: Record<string, VariantInfo> = {};
 
   if (allGids.size > 0) {
     try {
+      interface VariantNode {
+        id: string;
+        title: string;
+        sku: string;
+        product: { title: string };
+      }
+      interface NodesResponse {
+        nodes: Array<VariantNode | null>;
+      }
+
       const response = await admin.graphql(
         `#graphql
           query getVariants($ids: [ID!]!) {
@@ -54,13 +70,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         { variables: { ids: Array.from(allGids) } },
       );
 
-      const data = await response.json();
+      const data = (await response.json()) as { data?: NodesResponse };
 
       for (const node of data.data?.nodes ?? []) {
         if (node?.id) {
-          const sku = node.sku ? ` (${node.sku})` : "";
-          variantTitles[node.id] =
-            `${node.product?.title ?? "Unknown"} - ${node.title}${sku}`;
+          const displayTitle =
+            node.title === "Default Title"
+              ? node.product.title
+              : `${node.product.title} - ${node.title}`;
+          variantInfo[node.id] = {
+            title: displayTitle,
+            sku: node.sku || "",
+          };
         }
       }
     } catch {
@@ -70,15 +91,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Build CSV
   const rows: string[] = [
-    // Header row
-    "name,parent_gid,parent_title,child_gid,child_title,quantity,expand_on_pick",
+    // Header row - new format
+    "parent_gid,parent_name,parent_sku,child_gid,child_name,quantity,expand_on_pick",
   ];
 
   for (const bundle of bundles) {
-    const parentTitle = variantTitles[bundle.parentGid] ?? "";
+    const parentInfo = variantInfo[bundle.parentGid];
+    const parentTitle =
+      bundle.parentTitle || parentInfo?.title || bundle.parentGid;
+    const parentSku = bundle.parentSku || parentInfo?.sku || "";
 
     for (const child of bundle.children) {
-      const childTitle = variantTitles[child.childGid] ?? "";
+      const childInfo = variantInfo[child.childGid];
+      const childTitle = childInfo?.title || child.childGid;
 
       // Escape CSV fields that might contain commas
       const escapeCsv = (s: string) => {
@@ -90,9 +115,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       rows.push(
         [
-          escapeCsv(bundle.name),
           bundle.parentGid,
           escapeCsv(parentTitle),
+          escapeCsv(parentSku),
           child.childGid,
           escapeCsv(childTitle),
           String(child.quantity),

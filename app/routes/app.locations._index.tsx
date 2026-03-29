@@ -3,259 +3,446 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import {
-  useLoaderData,
-  useNavigate,
-  useFetcher,
-  useSearchParams,
-} from "react-router";
+import { useLoaderData, useFetcher } from "react-router";
+import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import {
-  syncBinLocationMetafield,
-  deleteBinLocationMetafield,
-} from "../services/metafields.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const url = new URL(request.url);
-  const search = url.searchParams.get("search") ?? "";
-
-  // Ensure shop exists in database
   await db.shop.upsert({
     where: { id: shop },
     create: { id: shop },
     update: {},
   });
 
-  // Fetch bin locations
-  const locations = await db.binLocation.findMany({
-    where: {
-      shopId: shop,
-      ...(search
-        ? {
-            OR: [
-              { location: { contains: search } },
-              { variantGid: { contains: search } },
-            ],
-          }
-        : {}),
-    },
-    orderBy: { location: "asc" },
+  const bins = await db.bin.findMany({
+    where: { shopId: shop },
+    include: { variants: true },
+    orderBy: { sortOrder: "asc" },
   });
 
-  return { locations, shop, search };
+  return { bins, shop };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session, admin } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
   const intent = formData.get("intent");
 
-  if (intent === "delete") {
-    const locationId = formData.get("locationId") as string;
+  if (intent === "create_bin") {
+    const name = formData.get("name") as string;
+    const description = (formData.get("description") as string) || null;
 
-    // Get the bin location first to get the variantGid
-    const binLocation = await db.binLocation.findUnique({
-      where: { id: locationId, shopId: shop },
+    const maxOrder = await db.bin.aggregate({
+      where: { shopId: shop },
+      _max: { sortOrder: true },
     });
 
-    if (binLocation) {
-      // Delete metafield
-      try {
-        await deleteBinLocationMetafield(admin, binLocation.variantGid);
-      } catch (error) {
-        console.error("Failed to delete bin location metafield:", error);
-      }
-    }
-
-    await db.binLocation.delete({
-      where: {
-        id: locationId,
+    await db.bin.create({
+      data: {
         shopId: shop,
+        name,
+        description,
+        sortOrder: (maxOrder._max.sortOrder ?? -1) + 1,
       },
+    });
+
+    return { created: true };
+  }
+
+  if (intent === "update_bin") {
+    const binId = formData.get("binId") as string;
+    const name = formData.get("name") as string | null;
+    const description = formData.get("description") as string | null;
+
+    const data: Record<string, string> = {};
+    if (name !== null) data.name = name;
+    if (description !== null) data.description = description;
+
+    await db.bin.update({
+      where: { id: binId, shopId: shop },
+      data,
+    });
+
+    return { updated: true };
+  }
+
+  if (intent === "delete_bin") {
+    const binId = formData.get("binId") as string;
+
+    await db.bin.delete({
+      where: { id: binId, shopId: shop },
     });
 
     return { deleted: true };
   }
 
-  if (intent === "update") {
-    const locationId = formData.get("locationId") as string;
-    const newLocation = formData.get("location") as string;
+  if (intent === "add_variants") {
+    const binId = formData.get("binId") as string;
+    const variantGids: string[] = JSON.parse(
+      formData.get("variantGids") as string,
+    );
 
-    const binLocation = await db.binLocation.update({
-      where: {
-        id: locationId,
-        shopId: shop,
-      },
-      data: {
-        location: newLocation,
-      },
-    });
-
-    // Sync to metafield
-    try {
-      await syncBinLocationMetafield(
-        admin,
-        binLocation.variantGid,
-        newLocation,
-      );
-    } catch (error) {
-      console.error("Failed to sync bin location metafield:", error);
+    for (const variantGid of variantGids) {
+      await db.binVariant.deleteMany({
+        where: { shopId: shop, variantGid },
+      });
+      await db.binVariant.create({
+        data: { binId, shopId: shop, variantGid },
+      });
     }
 
-    return { updated: true };
+    return { added: true };
   }
 
-  if (intent === "create") {
+  if (intent === "remove_variant") {
+    const binId = formData.get("binId") as string;
     const variantGid = formData.get("variantGid") as string;
-    const location = formData.get("location") as string;
 
-    // Ensure shop exists
-    await db.shop.upsert({
-      where: { id: shop },
-      create: { id: shop },
-      update: {},
+    await db.binVariant.delete({
+      where: { binId_variantGid: { binId, variantGid } },
     });
 
-    await db.binLocation.upsert({
-      where: {
-        shopId_variantGid: {
-          shopId: shop,
-          variantGid,
-        },
-      },
-      create: {
-        shopId: shop,
-        variantGid,
-        location,
-      },
-      update: {
-        location,
-      },
-    });
+    return { removed: true };
+  }
 
-    // Sync to metafield
-    try {
-      await syncBinLocationMetafield(admin, variantGid, location);
-    } catch (error) {
-      console.error("Failed to sync bin location metafield:", error);
+  if (intent === "reorder") {
+    const order: Array<{ id: string; sortOrder: number }> = JSON.parse(
+      formData.get("order") as string,
+    );
+
+    for (const item of order) {
+      await db.bin.update({
+        where: { id: item.id, shopId: shop },
+        data: { sortOrder: item.sortOrder },
+      });
     }
 
-    return { created: true };
+    return { reordered: true };
   }
 
   return { error: "Unknown action" };
 };
 
+function shortenGid(gid: string): string {
+  const match = gid.match(/\/(\d+)$/);
+  return match ? `…${match[1]}` : gid;
+}
+
 export default function LocationsIndex() {
-  const { locations, search } = useLoaderData<typeof loader>();
-  const navigate = useNavigate();
+  const { bins } = useLoaderData<typeof loader>();
   const fetcher = useFetcher();
-  const [searchParams, setSearchParams] = useSearchParams();
 
-  const handleSearch = (value: string) => {
-    const params = new URLSearchParams(searchParams);
-    if (value) {
-      params.set("search", value);
-    } else {
-      params.delete("search");
-    }
-    setSearchParams(params);
-  };
+  const [newBinOpen, setNewBinOpen] = useState(false);
+  const [newBinName, setNewBinName] = useState("");
+  const [newBinDescription, setNewBinDescription] = useState("");
 
-  const handleDelete = (locationId: string, variantGid: string) => {
-    if (confirm(`Delete bin location for ${variantGid}?`)) {
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      fetcher.submit({ intent: "delete", locationId }, { method: "POST" });
-    }
-  };
-
-  const handleUpdate = (locationId: string, newLocation: string) => {
+  const handleCreateBin = () => {
+    if (!newBinName.trim()) return;
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(
-      { intent: "update", locationId, location: newLocation },
+      {
+        intent: "create_bin",
+        name: newBinName.trim(),
+        description: newBinDescription.trim(),
+      },
+      { method: "POST" },
+    );
+    setNewBinName("");
+    setNewBinDescription("");
+    setNewBinOpen(false);
+  };
+
+  const handleDeleteBin = (binId: string, binName: string) => {
+    if (confirm(`Delete bin "${binName}" and all its variant assignments?`)) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      fetcher.submit({ intent: "delete_bin", binId }, { method: "POST" });
+    }
+  };
+
+  const handleEditBin = (
+    binId: string,
+    currentName: string,
+    currentDescription: string,
+  ) => {
+    const name = prompt("Bin name:", currentName);
+    if (name === null) return;
+    const description = prompt("Description (optional):", currentDescription);
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "update_bin", binId, name, description: description ?? "" },
+      { method: "POST" },
+    );
+  };
+
+  const handleAddVariants = async (binId: string) => {
+    const selected = await window.shopify.resourcePicker({
+      type: "variant",
+      multiple: true,
+    });
+    if (!selected || selected.length === 0) return;
+    const variantGids = selected
+      .map(
+        (s: { variants?: Array<{ id: string }>; id?: string }) =>
+          s.variants?.[0]?.id ?? s.id ?? "",
+      )
+      .filter(Boolean);
+    if (variantGids.length === 0) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "add_variants",
+        binId,
+        variantGids: JSON.stringify(variantGids),
+      },
+      { method: "POST" },
+    );
+  };
+
+  const handleRemoveVariant = (binId: string, variantGid: string) => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "remove_variant", binId, variantGid },
+      { method: "POST" },
+    );
+  };
+
+  const handleMoveUp = (index: number) => {
+    if (index === 0) return;
+    const order = bins.map((b) => ({ id: b.id, sortOrder: b.sortOrder }));
+    const current = order[index];
+    const prev = order[index - 1];
+    if (!current || !prev) return;
+    const temp = current.sortOrder;
+    current.sortOrder = prev.sortOrder;
+    prev.sortOrder = temp;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "reorder", order: JSON.stringify(order) },
+      { method: "POST" },
+    );
+  };
+
+  const handleMoveDown = (index: number) => {
+    if (index >= bins.length - 1) return;
+    const order = bins.map((b) => ({ id: b.id, sortOrder: b.sortOrder }));
+    const current = order[index];
+    const next = order[index + 1];
+    if (!current || !next) return;
+    const temp = current.sortOrder;
+    current.sortOrder = next.sortOrder;
+    next.sortOrder = temp;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "reorder", order: JSON.stringify(order) },
       { method: "POST" },
     );
   };
 
   return (
     <s-page heading="Bin Locations">
-      <s-button
-        slot="primary-action"
-        onClick={() => navigate("/app/locations/import")}
-      >
-        Import CSV
+      <s-button slot="primary-action" onClick={() => setNewBinOpen(true)}>
+        + New Bin
       </s-button>
 
-      <s-section heading="Warehouse Bin Locations">
+      <s-section heading="Warehouse Bins">
         <s-stack direction="block" gap="base">
-          <s-text-field
-            label="Search locations"
-            value={search}
-            placeholder="Search by location or variant GID..."
-            onInput={(e: Event) => {
-              const target = e.target as HTMLInputElement;
-              handleSearch(target.value);
-            }}
-          />
+          {newBinOpen && (
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+              background="subdued"
+            >
+              <s-stack direction="block" gap="small">
+                <s-heading>Create New Bin</s-heading>
+                <s-text-field
+                  label="Name"
+                  value={newBinName}
+                  placeholder='e.g. "A1-03", "Cold Room"'
+                  onInput={(e: Event) =>
+                    setNewBinName((e.target as HTMLInputElement).value)
+                  }
+                />
+                <s-text-field
+                  label="Description (optional)"
+                  value={newBinDescription}
+                  placeholder="Optional description"
+                  onInput={(e: Event) =>
+                    setNewBinDescription((e.target as HTMLInputElement).value)
+                  }
+                />
+                <s-stack direction="inline" gap="small">
+                  <s-button onClick={handleCreateBin}>Create</s-button>
+                  <s-button
+                    variant="secondary"
+                    onClick={() => setNewBinOpen(false)}
+                  >
+                    Cancel
+                  </s-button>
+                </s-stack>
+              </s-stack>
+            </s-box>
+          )}
 
-          {locations.length === 0 ? (
+          {bins.length === 0 && !newBinOpen ? (
             <s-box padding="large" borderRadius="base" background="subdued">
               <s-stack direction="block" gap="base">
-                <s-heading>No bin locations configured</s-heading>
+                <s-heading>No bins configured</s-heading>
                 <s-paragraph>
-                  Import bin locations via CSV to enable warehouse picking with
-                  location information.
+                  Create bins to organize your warehouse. Each product variant
+                  can be assigned to one bin for efficient picking.
                 </s-paragraph>
-                <s-button onClick={() => navigate("/app/locations/import")}>
-                  Import locations
+                <s-button onClick={() => setNewBinOpen(true)}>
+                  Create your first bin
                 </s-button>
               </s-stack>
             </s-box>
           ) : (
             <s-stack direction="block" gap="small">
-              {locations.map((loc) => (
+              {bins.map((bin, index) => (
                 <s-box
-                  key={loc.id}
+                  key={bin.id}
                   padding="base"
                   borderWidth="base"
                   borderRadius="base"
                 >
-                  <s-stack
-                    direction="inline"
-                    gap="base"
-                    justifyContent="space-between"
-                    alignItems="center"
-                  >
-                    <s-stack direction="block" gap="small">
-                      <s-heading>{loc.location}</s-heading>
-                      <s-text tone="neutral">{loc.variantGid}</s-text>
+                  <s-stack direction="block" gap="small">
+                    {/* Header row */}
+                    <s-stack
+                      direction="inline"
+                      gap="base"
+                      justifyContent="space-between"
+                      alignItems="center"
+                    >
+                      <s-stack
+                        direction="inline"
+                        gap="small"
+                        alignItems="center"
+                      >
+                        <s-stack direction="block" gap="none">
+                          <button
+                            disabled={index === 0}
+                            onClick={() => handleMoveUp(index)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: index === 0 ? "default" : "pointer",
+                              opacity: index === 0 ? 0.3 : 1,
+                              padding: "0 4px",
+                              fontSize: "12px",
+                              lineHeight: 1,
+                            }}
+                            title="Move up"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            disabled={index >= bins.length - 1}
+                            onClick={() => handleMoveDown(index)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor:
+                                index >= bins.length - 1
+                                  ? "default"
+                                  : "pointer",
+                              opacity: index >= bins.length - 1 ? 0.3 : 1,
+                              padding: "0 4px",
+                              fontSize: "12px",
+                              lineHeight: 1,
+                            }}
+                            title="Move down"
+                          >
+                            ▼
+                          </button>
+                        </s-stack>
+                        <s-text type="strong">{bin.name}</s-text>
+                        {bin.description && (
+                          <s-text tone="neutral">— {bin.description}</s-text>
+                        )}
+                      </s-stack>
+                      <s-text tone="neutral">
+                        {bin.variants.length} SKU
+                        {bin.variants.length !== 1 ? "s" : ""}
+                      </s-text>
                     </s-stack>
-                    <s-stack direction="inline" gap="small">
+
+                    {/* Variant list */}
+                    {bin.variants.length > 0 && (
+                      <div style={{ paddingLeft: "32px" }}>
+                        {bin.variants.map((v, vi) => (
+                          <div
+                            key={v.id}
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              padding: "4px 0",
+                              borderBottom:
+                                vi < bin.variants.length - 1
+                                  ? "1px solid var(--p-color-border-subdued)"
+                                  : "none",
+                            }}
+                          >
+                            <s-text tone="neutral">
+                              {vi < bin.variants.length - 1 ? "├" : "└"}{" "}
+                              {shortenGid(v.variantGid)}
+                            </s-text>
+                            <button
+                              onClick={() =>
+                                handleRemoveVariant(bin.id, v.variantGid)
+                              }
+                              title="Remove variant"
+                              style={{
+                                background: "none",
+                                border: "none",
+                                cursor: "pointer",
+                                color: "var(--p-color-text-critical)",
+                                fontSize: "14px",
+                                padding: "2px 6px",
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    <s-stack
+                      direction="inline"
+                      gap="small"
+                      justifyContent="end"
+                    >
                       <s-button
-                        variant="secondary"
+                        variant="tertiary"
                         onClick={() => {
-                          const newLoc = prompt(
-                            "New bin location:",
-                            loc.location,
-                          );
-                          if (newLoc && newLoc !== loc.location) {
-                            handleUpdate(loc.id, newLoc);
-                          }
+                          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+                          handleAddVariants(bin.id);
                         }}
+                      >
+                        + Add Variants
+                      </s-button>
+                      <s-button
+                        variant="tertiary"
+                        onClick={() =>
+                          handleEditBin(bin.id, bin.name, bin.description ?? "")
+                        }
                       >
                         Edit
                       </s-button>
                       <s-button
-                        variant="secondary"
+                        variant="tertiary"
                         tone="critical"
-                        onClick={() => handleDelete(loc.id, loc.variantGid)}
+                        onClick={() => handleDeleteBin(bin.id, bin.name)}
                       >
                         Delete
                       </s-button>
@@ -266,33 +453,30 @@ export default function LocationsIndex() {
             </s-stack>
           )}
 
-          <s-paragraph tone="neutral">
-            {locations.length} bin location{locations.length !== 1 ? "s" : ""}{" "}
-            configured
+          <s-text tone="neutral">
+            {bins.length} bin{bins.length !== 1 ? "s" : ""} configured
+          </s-text>
+        </s-stack>
+      </s-section>
+
+      <s-section slot="aside" heading="About Bins">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Bins represent physical locations in your warehouse (shelves, cold
+            rooms, racks, etc.). Assign product variants to bins so pick lists
+            are sorted by location for efficient warehouse navigation.
+          </s-paragraph>
+          <s-paragraph>
+            Each variant can only belong to one bin at a time. Adding a variant
+            to a new bin automatically removes it from its previous bin.
           </s-paragraph>
         </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="About Bin Locations">
+      <s-section slot="aside" heading="Reordering">
         <s-paragraph>
-          Bin locations help warehouse staff quickly find products when picking
-          orders. Each product variant can have one bin location assigned.
-        </s-paragraph>
-        <s-paragraph>
-          The pick list will be sorted by bin location for efficient warehouse
-          navigation.
-        </s-paragraph>
-      </s-section>
-
-      <s-section slot="aside" heading="CSV Format">
-        <s-paragraph>
-          Import bin locations using a CSV file with the following columns:
-        </s-paragraph>
-        <s-box padding="base" borderRadius="base" background="subdued">
-          <code>variant_gid,variant_sku,bin_location</code>
-        </s-box>
-        <s-paragraph tone="neutral">
-          The variant_sku column is optional and used for reference only.
+          Use the ▲▼ arrows to reorder bins. The pick list will follow this
+          order so you can match your warehouse walk path.
         </s-paragraph>
       </s-section>
     </s-page>

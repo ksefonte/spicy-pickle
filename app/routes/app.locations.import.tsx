@@ -11,7 +11,8 @@ import db from "../db.server";
 
 interface ImportResult {
   success: boolean;
-  imported: number;
+  binsCreated: number;
+  variantsAssigned: number;
   skipped: number;
   errors: string[];
 }
@@ -31,13 +32,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!csvContent) {
     return {
       success: false,
-      imported: 0,
+      binsCreated: 0,
+      variantsAssigned: 0,
       skipped: 0,
       errors: ["No CSV content provided"],
     } satisfies ImportResult;
   }
 
-  // Ensure shop exists
   await db.shop.upsert({
     where: { id: shop },
     create: { id: shop },
@@ -46,17 +47,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const lines = csvContent.trim().split("\n");
   const errors: string[] = [];
-  let imported = 0;
+  let binsCreated = 0;
+  let variantsAssigned = 0;
   let skipped = 0;
 
-  // Skip header row if present
   const startIndex = lines[0]?.toLowerCase().includes("variant_gid") ? 1 : 0;
+
+  const maxOrder = await db.bin.aggregate({
+    where: { shopId: shop },
+    _max: { sortOrder: true },
+  });
+  let nextSortOrder = (maxOrder._max.sortOrder ?? -1) + 1;
+
+  const binCache = new Map<string, string>();
+  const existingBins = await db.bin.findMany({
+    where: { shopId: shop },
+    select: { id: true, name: true },
+  });
+  for (const bin of existingBins) {
+    binCache.set(bin.name, bin.id);
+  }
 
   for (let i = startIndex; i < lines.length; i++) {
     const line = lines[i]?.trim();
     if (!line) continue;
 
-    // Parse CSV line (handle quoted values)
     const parts = parseCSVLine(line);
 
     if (parts.length < 2) {
@@ -66,8 +81,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     const variantGid = parts[0]?.trim();
-    // parts[1] is SKU (optional, for reference only)
-    const location = parts.length >= 3 ? parts[2]?.trim() : parts[1]?.trim();
+    const binName = parts.length >= 3 ? parts[2]?.trim() : parts[1]?.trim();
 
     if (!variantGid) {
       errors.push(`Line ${i + 1}: Missing variant GID`);
@@ -75,13 +89,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       continue;
     }
 
-    if (!location) {
-      errors.push(`Line ${i + 1}: Missing bin location`);
+    if (!binName) {
+      errors.push(`Line ${i + 1}: Missing bin name`);
       skipped++;
       continue;
     }
 
-    // Validate GID format
     if (!variantGid.startsWith("gid://shopify/ProductVariant/")) {
       errors.push(
         `Line ${i + 1}: Invalid variant GID format (should start with gid://shopify/ProductVariant/)`,
@@ -91,23 +104,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     try {
-      await db.binLocation.upsert({
-        where: {
-          shopId_variantGid: {
+      let binId = binCache.get(binName);
+      if (!binId) {
+        const bin = await db.bin.create({
+          data: {
             shopId: shop,
-            variantGid,
+            name: binName,
+            sortOrder: nextSortOrder++,
           },
-        },
-        create: {
-          shopId: shop,
-          variantGid,
-          location,
-        },
-        update: {
-          location,
-        },
+        });
+        binId = bin.id;
+        binCache.set(binName, binId);
+        binsCreated++;
+      }
+
+      await db.binVariant.deleteMany({
+        where: { shopId: shop, variantGid },
       });
-      imported++;
+      await db.binVariant.create({
+        data: { binId, shopId: shop, variantGid },
+      });
+      variantsAssigned++;
     } catch (error) {
       errors.push(`Line ${i + 1}: Failed to import - ${String(error)}`);
       skipped++;
@@ -116,9 +133,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   return {
     success: errors.length === 0,
-    imported,
+    binsCreated,
+    variantsAssigned,
     skipped,
-    errors: errors.slice(0, 10), // Limit errors to first 10
+    errors: errors.slice(0, 10),
   } satisfies ImportResult;
 };
 
@@ -178,8 +196,9 @@ export default function LocationsImport() {
       <s-section heading="Upload CSV">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Upload a CSV file with bin locations. The file should have columns
-            for variant GID, SKU (optional), and bin location.
+            Upload a CSV file with bin locations. Bins will be created
+            automatically from unique location names. Variants are assigned to
+            their respective bins.
           </s-paragraph>
 
           <s-box padding="base" borderRadius="base" background="subdued">
@@ -232,11 +251,7 @@ export default function LocationsImport() {
           </s-stack>
 
           {result && (
-            <s-box
-              padding="base"
-              borderRadius="base"
-              background={result.success ? "subdued" : "subdued"}
-            >
+            <s-box padding="base" borderRadius="base" background="subdued">
               <s-stack direction="block" gap="small">
                 <s-heading>
                   {result.success
@@ -244,7 +259,8 @@ export default function LocationsImport() {
                     : "Import Completed with Errors"}
                 </s-heading>
                 <s-paragraph>
-                  Imported: {result.imported} • Skipped: {result.skipped}
+                  Bins created: {result.binsCreated} • Variants assigned:{" "}
+                  {result.variantsAssigned} • Skipped: {result.skipped}
                 </s-paragraph>
                 {result.errors.length > 0 && (
                   <s-stack direction="block" gap="small">
@@ -265,14 +281,14 @@ export default function LocationsImport() {
       <s-section slot="aside" heading="Tips">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            <s-text type="strong">Getting Variant GIDs:</s-text> Export your
-            products from Shopify Admin to get the variant GIDs, or use the
-            Shopify GraphQL API.
+            <s-text type="strong">Bin creation:</s-text> Unique bin names from
+            the CSV will be created as new bins automatically. Existing bins
+            with the same name will be reused.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Updating locations:</s-text> If a variant
-            already has a bin location, importing will update it to the new
-            value.
+            <s-text type="strong">One bin per variant:</s-text> If a variant
+            already has a bin assignment, it will be moved to the new bin from
+            the import.
           </s-paragraph>
         </s-stack>
       </s-section>

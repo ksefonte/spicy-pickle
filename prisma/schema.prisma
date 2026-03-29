@@ -44,11 +44,14 @@ model Session {
 
 /// Represents a Shopify store using the app
 model Shop {
-  id           String        @id // shop domain (e.g., "my-store.myshopify.com")
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  bundles      Bundle[]
-  binLocations BinLocation[]
+  id                   String        @id // shop domain (e.g., "my-store.myshopify.com")
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  lastMetaobjectSyncAt DateTime?
+  syncEnabled          Boolean       @default(false) // Global inventory sync toggle
+  bundles              Bundle[]
+  bins                 Bin[]
+  supplierSkus         SupplierSku[]
 }
 
 /// A bundle configuration linking a parent variant to its child components
@@ -57,12 +60,14 @@ model Bundle {
   id           String        @id @default(cuid())
   shopId       String
   shop         Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  name         String        // User-friendly name for the bundle (e.g., "Lager 24-Pack")
   parentGid    String        // Shopify Product Variant GID (e.g., "gid://shopify/ProductVariant/123")
+  parentTitle  String?       // Cached title from Shopify (e.g., "Hāpi Daze - 24 Pack")
+  parentSku    String?       // Cached SKU from Shopify
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   children     BundleChild[]
   expandOnPick Boolean       @default(false) // If true, expand to components in pick list
+  syncEnabled  Boolean       @default(false) // Per-bundle inventory sync toggle
 
   @@unique([shopId, parentGid])
   @@index([shopId])
@@ -81,18 +86,34 @@ model BundleChild {
   @@index([childGid])
 }
 
-/// Bin/location mapping for warehouse picking
-model BinLocation {
+/// A named physical bin/location in the warehouse
+model Bin {
+  id          String       @id @default(cuid())
+  shopId      String
+  shop        Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String       // Short label: "A1-03", "Cold Room", "Poster Shelf"
+  description String?
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  variants    BinVariant[]
+
+  @@unique([shopId, name])
+  @@index([shopId])
+}
+
+/// A variant assigned to a bin (one bin per variant per shop, enforced at DB level)
+model BinVariant {
   id         String   @id @default(cuid())
-  shopId     String
-  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  binId      String
+  bin        Bin      @relation(fields: [binId], references: [id], onDelete: Cascade)
+  shopId     String   // Denormalized from Bin for unique constraint
   variantGid String   // Shopify Product Variant GID
-  location   String   // Free-form bin location string (e.g., "A1-03", "Cold Room Shelf 2")
   createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
 
   @@unique([shopId, variantGid])
-  @@index([shopId])
+  @@unique([binId, variantGid])
+  @@index([variantGid])
 }
 
 /// Sync lock for idempotency during inventory webhook processing
@@ -105,4 +126,31 @@ model SyncLock {
 
   @@index([bundleId])
   @@index([expiresAt])
+}
+
+/// Cached migration scan results per shop, stored as JSON so the migration
+/// page can reload instantly without re-querying the Shopify API on every deploy.
+model MigrationScanCache {
+  id          String   @id // shop domain
+  scannedAt   DateTime
+  productsJson String  // JSON-serialised ProductMigrationInfo[]
+  namespacesJson String // JSON-serialised Record<string, string>
+  diagnosticsJson String // JSON-serialised MetafieldDiagnostic[]
+  countsJson  String   // JSON-serialised Record<string, number>
+}
+
+/// Supplier SKU mapping for inventory cost tracking
+/// Maps Shopify variants to supplier SKUs with quantity ratios
+model SupplierSku {
+  id              String   @id @default(cuid())
+  shopId          String
+  shop            Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantGid      String   // Shopify Product Variant GID
+  supplierSku     String   // The supplier's SKU code (e.g., "HD 4X6")
+  supplierSkuQty  Float    // How many of this variant per supplier SKU (e.g., 0.25 means 4 of this variant = 1 supplier SKU)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([shopId, variantGid])
+  @@index([shopId])
 }

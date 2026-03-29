@@ -10,9 +10,9 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import {
-  syncBundleMetafield,
-  deleteBundleMetafield,
-} from "../services/metafields.server";
+  updateBundleMetaobjects,
+  deleteBundleMetaobjects,
+} from "../services/metaobject-writes.server";
 
 interface ChildVariant {
   gid: string;
@@ -58,6 +58,17 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   ];
 
   const variantTitles: Record<string, string> = {};
+  const variantSkus: Record<string, string> = {};
+
+  interface VariantNode {
+    id: string;
+    title: string;
+    sku: string;
+    product: { title: string };
+  }
+  interface NodesResponse {
+    nodes: Array<VariantNode | null>;
+  }
 
   try {
     const response = await admin.graphql(
@@ -67,6 +78,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
             ... on ProductVariant {
               id
               title
+              sku
               product {
                 title
               }
@@ -77,19 +89,23 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
       { variables: { ids: variantGids } },
     );
 
-    const data = await response.json();
+    const data = (await response.json()) as { data?: NodesResponse };
 
     for (const node of data.data?.nodes ?? []) {
       if (node?.id) {
-        variantTitles[node.id] =
-          `${node.product?.title ?? "Unknown"} - ${node.title}`;
+        const displayTitle =
+          node.title === "Default Title"
+            ? node.product.title
+            : `${node.product.title} - ${node.title}`;
+        variantTitles[node.id] = displayTitle;
+        variantSkus[node.id] = node.sku || "";
       }
     }
   } catch {
     console.error("Failed to fetch variant titles");
   }
 
-  return { bundle, variantTitles };
+  return { bundle, variantTitles, variantSkus };
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
@@ -105,35 +121,22 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   const intent = formData.get("intent");
 
   if (intent === "delete") {
-    // Get the bundle first to get the parentGid
     const bundle = await db.bundle.findUnique({
       where: { id: bundleId, shopId: shop },
     });
 
     if (bundle) {
-      // Delete metafield first
-      try {
-        await deleteBundleMetafield(admin, bundle.parentGid);
-      } catch (error) {
-        console.error("Failed to delete bundle metafield:", error);
-      }
+      await deleteBundleMetaobjects(admin, shop, bundle.parentGid);
     }
 
-    await db.bundle.delete({
-      where: {
-        id: bundleId,
-        shopId: shop,
-      },
-    });
     return redirect("/app/bundles");
   }
 
   if (intent === "update") {
-    const name = formData.get("name") as string;
     const expandOnPick = formData.get("expandOnPick") === "true";
     const childrenJson = formData.get("children") as string;
 
-    if (!name || !childrenJson) {
+    if (!childrenJson) {
       return { error: "Missing required fields" };
     }
 
@@ -143,33 +146,26 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       return { error: "At least one child variant is required" };
     }
 
-    const bundle = await db.bundle.update({
-      where: {
-        id: bundleId,
-        shopId: shop,
-      },
-      data: {
-        name,
-        expandOnPick,
-        children: {
-          deleteMany: {},
-          create: children.map((child) => ({
-            childGid: child.gid,
-            quantity: child.quantity,
-          })),
-        },
-      },
-      include: {
-        children: true,
-      },
+    const existingBundle = await db.bundle.findUnique({
+      where: { id: bundleId, shopId: shop },
     });
 
-    // Sync updated bundle to metafield
-    try {
-      await syncBundleMetafield(admin, bundle);
-    } catch (error) {
-      console.error("Failed to sync bundle metafield:", error);
+    if (!existingBundle) {
+      return { error: "Bundle not found" };
     }
+
+    await updateBundleMetaobjects(
+      admin,
+      shop,
+      existingBundle.parentGid,
+      children.map((c) => ({
+        childGid: c.gid,
+        quantity: c.quantity,
+      })),
+      {
+        expandOnPick,
+      },
+    );
 
     return { success: true };
   }
@@ -178,11 +174,10 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 };
 
 export default function EditBundle() {
-  const { bundle, variantTitles } = useLoaderData<typeof loader>();
+  const { bundle, variantTitles, variantSkus } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
 
-  const [name, setName] = useState(bundle.name);
   const [children, setChildren] = useState<ChildVariant[]>(
     bundle.children.map((c) => ({
       gid: c.childGid,
@@ -193,13 +188,22 @@ export default function EditBundle() {
   const [expandOnPick, setExpandOnPick] = useState(bundle.expandOnPick);
 
   const isSubmitting = fetcher.state === "submitting";
-  const parentTitle = variantTitles[bundle.parentGid] ?? bundle.parentGid;
+  const parentTitle =
+    bundle.parentTitle || variantTitles[bundle.parentGid] || bundle.parentGid;
+  const parentSku = bundle.parentSku || variantSkus[bundle.parentGid] || "";
 
   useEffect(() => {
     if (fetcher.data?.success) {
       void shopify.toast.show("Bundle updated successfully");
     }
   }, [fetcher.data, shopify]);
+
+  const getDisplayTitle = (variant: SelectedVariant): string => {
+    const productTitle = variant.product?.title ?? "Unknown Product";
+    return variant.title === "Default Title"
+      ? productTitle
+      : `${productTitle} - ${variant.title}`;
+  };
 
   const openChildPicker = async () => {
     const selection = await shopify.resourcePicker({
@@ -211,7 +215,7 @@ export default function EditBundle() {
     if (selection && selection.length > 0) {
       const newChildren = (selection as SelectedVariant[]).map((variant) => ({
         gid: variant.id,
-        title: `${variant.product?.title ?? "Unknown"} - ${variant.title}`,
+        title: getDisplayTitle(variant),
         quantity: 1,
       }));
 
@@ -247,7 +251,6 @@ export default function EditBundle() {
     fetcher.submit(
       {
         intent: "update",
-        name,
         expandOnPick: String(expandOnPick),
         children: JSON.stringify(children),
       },
@@ -256,7 +259,7 @@ export default function EditBundle() {
   };
 
   const handleDelete = () => {
-    if (confirm(`Are you sure you want to delete "${bundle.name}"?`)) {
+    if (confirm(`Are you sure you want to delete "${parentTitle}"?`)) {
       // eslint-disable-next-line @typescript-eslint/no-floating-promises
       fetcher.submit({ intent: "delete" }, { method: "POST" });
     }
@@ -264,7 +267,7 @@ export default function EditBundle() {
 
   return (
     <s-page
-      heading={`Edit: ${bundle.name}`}
+      heading={parentTitle}
       back-action={JSON.stringify({ url: "/app/bundles" })}
     >
       <s-button
@@ -284,36 +287,24 @@ export default function EditBundle() {
         </s-banner>
       )}
 
-      <s-section heading="Bundle Details">
+      <s-section heading="Parent Variant">
         <s-stack direction="block" gap="base">
-          <s-text-field
-            label="Bundle Name"
-            value={name}
-            onInput={(e: Event) => {
-              const target = e.target as HTMLInputElement;
-              setName(target.value);
-            }}
-            required
-          />
-
-          <s-stack direction="block" gap="small">
-            <s-heading>Parent Variant</s-heading>
-            <s-box
-              padding="base"
-              borderWidth="base"
-              borderRadius="base"
-              background="subdued"
-            >
-              <s-stack direction="block" gap="small">
-                <s-text>{parentTitle}</s-text>
-                <s-text tone="neutral">{bundle.parentGid}</s-text>
-              </s-stack>
-            </s-box>
-            <s-paragraph>
-              Parent variant cannot be changed. Delete and recreate the bundle
-              to change it.
-            </s-paragraph>
-          </s-stack>
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+            background="subdued"
+          >
+            <s-stack direction="block" gap="small">
+              <s-text type="strong">{parentTitle}</s-text>
+              {parentSku && <s-text tone="neutral">SKU: {parentSku}</s-text>}
+              <s-text tone="neutral">{bundle.parentGid}</s-text>
+            </s-stack>
+          </s-box>
+          <s-paragraph>
+            Parent variant cannot be changed. Delete and recreate the bundle to
+            change it.
+          </s-paragraph>
         </s-stack>
       </s-section>
 

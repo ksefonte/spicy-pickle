@@ -31,8 +31,9 @@ export interface InventoryUpdateEvent {
 export interface BundleWithChildren {
   id: string;
   shopId: string;
-  name: string;
   parentGid: string;
+  parentTitle?: string | null;
+  syncEnabled: boolean;
   children: Array<{
     id: string;
     childGid: string;
@@ -380,8 +381,21 @@ export async function processInventoryUpdate(
 ): Promise<SyncResult> {
   const { inventoryItemId, locationId, available, shop } = event;
 
+  // Check global sync toggle
+  const shopRecord = await db.shop.findUnique({
+    where: { id: shop },
+    select: { syncEnabled: true },
+  });
+  if (!shopRecord?.syncEnabled) {
+    return {
+      processed: true,
+      bundlesAffected: 0,
+      adjustmentsMade: 0,
+      skipped: "Sync disabled globally",
+    };
+  }
+
   // Convert inventory item ID to variant GID
-  // We need to find which variant has this inventory item
   const variantGid = await findVariantForInventoryItem(admin, inventoryItemId);
 
   if (!variantGid) {
@@ -405,13 +419,24 @@ export async function processInventoryUpdate(
     };
   }
 
+  // Filter to only sync-enabled bundles
+  const activeBundles = bundles.filter((b) => b.syncEnabled);
+
+  if (activeBundles.length === 0) {
+    return {
+      processed: true,
+      bundlesAffected: 0,
+      adjustmentsMade: 0,
+      skipped: "No sync-enabled bundles for this variant",
+    };
+  }
+
   let totalAdjustments = 0;
   const locationGid = `gid://shopify/Location/${locationId}`;
 
-  for (const bundle of bundles) {
+  for (const bundle of activeBundles) {
     const lockId = `sync-${bundle.id}-${locationId}-${Date.now()}`;
 
-    // Try to acquire lock
     const lockAcquired = await acquireSyncLock(lockId, bundle.id);
     if (!lockAcquired) {
       console.log(`Skipping bundle ${bundle.id} - sync already in progress`);
@@ -427,9 +452,8 @@ export async function processInventoryUpdate(
         available,
       );
 
-      // Log the adjustments for debugging
       console.log(
-        `[Sync] Bundle ${bundle.name} (${bundle.id}): ${adjustments.length} adjustments`,
+        `[Sync] Bundle ${bundle.parentTitle || bundle.parentGid} (${bundle.id}): ${adjustments.length} adjustments`,
       );
       for (const adj of adjustments) {
         console.log(`[Sync]   → ${adj.inventoryItemId}: delta=${adj.delta}`);
@@ -445,7 +469,7 @@ export async function processInventoryUpdate(
 
   return {
     processed: true,
-    bundlesAffected: bundles.length,
+    bundlesAffected: activeBundles.length,
     adjustmentsMade: totalAdjustments,
   };
 }

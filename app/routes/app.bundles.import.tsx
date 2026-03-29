@@ -9,11 +9,14 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { updateBundleMetaobjects } from "../services/metaobject-writes.server";
 
 interface CsvRow {
-  name: string;
   parent_gid: string;
+  parent_name: string;
+  parent_sku: string;
   child_gid: string;
+  child_name: string;
   quantity: number;
   expand_on_pick: boolean;
 }
@@ -30,7 +33,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   const formData = await request.formData();
@@ -55,17 +58,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { error: "CSV file is empty" };
   }
 
-  // Validate header
-  const expectedHeaders = [
-    "name",
-    "parent_gid",
-    "child_gid",
-    "quantity",
-    "expand_on_pick",
-  ];
+  // Validate header - new format includes parent_name and parent_sku
+  const requiredHeaders = ["parent_gid", "child_gid", "quantity"];
   const headers = header.split(",").map((h) => h.trim().toLowerCase());
 
-  const missingHeaders = expectedHeaders.filter((h) => !headers.includes(h));
+  const missingHeaders = requiredHeaders.filter((h) => !headers.includes(h));
   if (missingHeaders.length > 0) {
     return { error: `Missing required columns: ${missingHeaders.join(", ")}` };
   }
@@ -85,9 +82,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       row[h] = values[idx] ?? "";
     });
 
-    if (!row.name || !row.parent_gid || !row.child_gid) {
+    if (!row.parent_gid || !row.child_gid) {
       errors.push(
-        `Row ${i + 1}: Missing required fields (name, parent_gid, child_gid)`,
+        `Row ${i + 1}: Missing required fields (parent_gid, child_gid)`,
       );
       continue;
     }
@@ -99,9 +96,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     rows.push({
-      name: row.name,
       parent_gid: row.parent_gid,
+      parent_name: row.parent_name || "",
+      parent_sku: row.parent_sku || "",
       child_gid: row.child_gid,
+      child_name: row.child_name || "",
       quantity,
       expand_on_pick: row.expand_on_pick?.toLowerCase() === "true",
     });
@@ -111,7 +110,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const bundleMap = new Map<
     string,
     {
-      name: string;
+      parentTitle: string;
+      parentSku: string;
       expandOnPick: boolean;
       children: Array<{ gid: string; quantity: number }>;
     }
@@ -123,14 +123,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       existing.children.push({ gid: row.child_gid, quantity: row.quantity });
     } else {
       bundleMap.set(row.parent_gid, {
-        name: row.name,
+        parentTitle: row.parent_name,
+        parentSku: row.parent_sku,
         expandOnPick: row.expand_on_pick,
         children: [{ gid: row.child_gid, quantity: row.quantity }],
       });
     }
   }
 
-  // Create or update bundles
   let created = 0;
   let updated = 0;
 
@@ -142,41 +142,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
 
+      await updateBundleMetaobjects(
+        admin,
+        shop,
+        parentGid,
+        bundleData.children.map((c) => ({
+          childGid: c.gid,
+          quantity: c.quantity,
+        })),
+        {
+          parentTitle: bundleData.parentTitle || null,
+          parentSku: bundleData.parentSku || null,
+          expandOnPick: bundleData.expandOnPick,
+        },
+      );
+
       if (existing) {
-        await db.bundle.update({
-          where: { id: existing.id },
-          data: {
-            name: bundleData.name,
-            expandOnPick: bundleData.expandOnPick,
-            children: {
-              deleteMany: {},
-              create: bundleData.children.map((c) => ({
-                childGid: c.gid,
-                quantity: c.quantity,
-              })),
-            },
-          },
-        });
         updated++;
       } else {
-        await db.bundle.create({
-          data: {
-            shopId: shop,
-            name: bundleData.name,
-            parentGid,
-            expandOnPick: bundleData.expandOnPick,
-            children: {
-              create: bundleData.children.map((c) => ({
-                childGid: c.gid,
-                quantity: c.quantity,
-              })),
-            },
-          },
-        });
         created++;
       }
     } catch (e) {
-      errors.push(`Failed to save bundle "${bundleData.name}": ${String(e)}`);
+      errors.push(`Failed to save bundle for ${parentGid}: ${String(e)}`);
     }
   }
 
@@ -300,11 +287,10 @@ export default function ImportBundles() {
 
       <s-section slot="aside" heading="CSV Format">
         <s-stack direction="block" gap="base">
-          <s-paragraph>Required columns:</s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Required columns:</s-text>
+          </s-paragraph>
           <s-unordered-list>
-            <s-list-item>
-              <s-text type="strong">name</s-text> - Bundle name
-            </s-list-item>
             <s-list-item>
               <s-text type="strong">parent_gid</s-text> - Parent variant GID
             </s-list-item>
@@ -313,6 +299,21 @@ export default function ImportBundles() {
             </s-list-item>
             <s-list-item>
               <s-text type="strong">quantity</s-text> - Child quantity
+            </s-list-item>
+          </s-unordered-list>
+
+          <s-paragraph>
+            <s-text type="strong">Optional columns:</s-text>
+          </s-paragraph>
+          <s-unordered-list>
+            <s-list-item>
+              <s-text type="strong">parent_name</s-text> - Display name (cached)
+            </s-list-item>
+            <s-list-item>
+              <s-text type="strong">parent_sku</s-text> - SKU (cached)
+            </s-list-item>
+            <s-list-item>
+              <s-text type="strong">child_name</s-text> - Child display name
             </s-list-item>
             <s-list-item>
               <s-text type="strong">expand_on_pick</s-text> - true/false
@@ -329,10 +330,10 @@ export default function ImportBundles() {
           background="subdued"
         >
           <pre style={{ margin: 0, fontSize: "11px", whiteSpace: "pre-wrap" }}>
-            {`name,parent_gid,child_gid,quantity,expand_on_pick
-Lager 24-Pack,gid://shopify/ProductVariant/123,gid://shopify/ProductVariant/456,24,false
-Variety Pack,gid://shopify/ProductVariant/789,gid://shopify/ProductVariant/111,1,true
-Variety Pack,gid://shopify/ProductVariant/789,gid://shopify/ProductVariant/222,1,true`}
+            {`parent_gid,parent_name,parent_sku,child_gid,child_name,quantity,expand_on_pick
+gid://shopify/ProductVariant/123,Lager 24-Pack,LAG-24,gid://shopify/ProductVariant/456,Lager Single,24,false
+gid://shopify/ProductVariant/789,Variety Pack,VAR-6,gid://shopify/ProductVariant/111,Lager Single,2,true
+gid://shopify/ProductVariant/789,Variety Pack,VAR-6,gid://shopify/ProductVariant/222,Pale Ale Single,4,true`}
           </pre>
         </s-box>
         <s-paragraph>

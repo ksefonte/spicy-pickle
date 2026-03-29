@@ -23,11 +23,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const dbStatus = await testDatabase();
 
     // Get counts
-    const [bundleCount, binLocationCount, shopCount] = await Promise.all([
-      db.bundle.count(),
-      db.binLocation.count(),
-      db.shop.count(),
-    ]);
+    const [bundleCount, binCount, binVariantCount, shopCount] =
+      await Promise.all([
+        db.bundle.count(),
+        db.bin.count(),
+        db.binVariant.count(),
+        db.shop.count(),
+      ]);
 
     // Get recent sync locks (shows webhook activity)
     const recentSyncLocks = await db.syncLock.findMany({
@@ -53,7 +55,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       counts: {
         shops: shopCount,
         bundles: bundleCount,
-        binLocations: binLocationCount,
+        bins: binCount,
+        binVariants: binVariantCount,
       },
       recentWebhookActivity: recentSyncLocks.map((lock) => ({
         id: lock.id,

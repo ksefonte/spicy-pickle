@@ -110,7 +110,9 @@ describe("sortItems", () => {
       sku: "LAGER-1",
       variantGid: "gid://1",
       quantity: 10,
-      binLocation: "B-02",
+      binName: "B-02",
+      binSortOrder: 2,
+      available: 50,
     },
     {
       productTitle: "Ale",
@@ -118,7 +120,9 @@ describe("sortItems", () => {
       sku: "ALE-6",
       variantGid: "gid://2",
       quantity: 5,
-      binLocation: "A-01",
+      binName: "A-01",
+      binSortOrder: 0,
+      available: 30,
     },
     {
       productTitle: "Stout",
@@ -126,7 +130,9 @@ describe("sortItems", () => {
       sku: "STOUT-1",
       variantGid: "gid://3",
       quantity: 20,
-      binLocation: null,
+      binName: null,
+      binSortOrder: Number.MAX_SAFE_INTEGER,
+      available: null,
     },
     {
       productTitle: "Ale",
@@ -134,27 +140,29 @@ describe("sortItems", () => {
       sku: "ALE-1",
       variantGid: "gid://4",
       quantity: 3,
-      binLocation: "A-02",
+      binName: "A-02",
+      binSortOrder: 1,
+      available: 15,
     },
   ];
 
-  describe("sort by bin location", () => {
-    it("sorts by bin location ascending", () => {
-      const result = sortItems(testItems, "binLocation", "asc");
+  describe("sort by bin", () => {
+    it("sorts by bin sortOrder ascending", () => {
+      const result = sortItems(testItems, "bin", "asc");
 
-      expect(result[0]?.binLocation).toBe("A-01");
-      expect(result[1]?.binLocation).toBe("A-02");
-      expect(result[2]?.binLocation).toBe("B-02");
-      expect(result[3]?.binLocation).toBeNull(); // Null goes to end
+      expect(result[0]?.binName).toBe("A-01");
+      expect(result[1]?.binName).toBe("A-02");
+      expect(result[2]?.binName).toBe("B-02");
+      expect(result[3]?.binName).toBeNull();
     });
 
-    it("sorts by bin location descending", () => {
-      const result = sortItems(testItems, "binLocation", "desc");
+    it("sorts by bin sortOrder descending", () => {
+      const result = sortItems(testItems, "bin", "desc");
 
-      expect(result[0]?.binLocation).toBe("B-02");
-      expect(result[1]?.binLocation).toBe("A-02");
-      expect(result[2]?.binLocation).toBe("A-01");
-      expect(result[3]?.binLocation).toBeNull(); // Null still goes to end
+      expect(result[0]?.binName).toBe("B-02");
+      expect(result[1]?.binName).toBe("A-02");
+      expect(result[2]?.binName).toBe("A-01");
+      expect(result[3]?.binName).toBeNull();
     });
   });
 
@@ -209,7 +217,9 @@ describe("exportToCSV", () => {
         sku: "LAGER-1",
         variantGid: "gid://1",
         quantity: 10,
-        binLocation: "A-01",
+        binName: "A-01",
+        binSortOrder: 0,
+        available: 50,
       },
       {
         productTitle: "Ale",
@@ -217,7 +227,9 @@ describe("exportToCSV", () => {
         sku: "ALE-6",
         variantGid: "gid://2",
         quantity: 5,
-        binLocation: "B-02",
+        binName: "B-02",
+        binSortOrder: 1,
+        available: 30,
       },
     ];
 
@@ -225,9 +237,9 @@ describe("exportToCSV", () => {
     const lines = csv.split("\n");
 
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toBe("Product,Variant,SKU,Quantity,Bin Location");
-    expect(lines[1]).toBe("Lager,Single,LAGER-1,10,A-01");
-    expect(lines[2]).toBe("Ale,6-Pack,ALE-6,5,B-02");
+    expect(lines[0]).toBe("Product,Variant,SKU,Available,Quantity,Bin");
+    expect(lines[1]).toBe("Lager,Single,LAGER-1,50,10,A-01");
+    expect(lines[2]).toBe("Ale,6-Pack,ALE-6,30,5,B-02");
   });
 
   it("escapes values with commas", () => {
@@ -238,7 +250,9 @@ describe("exportToCSV", () => {
         sku: "LAGER-1",
         variantGid: "gid://1",
         quantity: 10,
-        binLocation: "A-01",
+        binName: "A-01",
+        binSortOrder: 0,
+        available: 50,
       },
     ];
 
@@ -256,7 +270,9 @@ describe("exportToCSV", () => {
         sku: "LAGER-1",
         variantGid: "gid://1",
         quantity: 10,
-        binLocation: "A-01",
+        binName: "A-01",
+        binSortOrder: 0,
+        available: 50,
       },
     ];
 
@@ -266,7 +282,7 @@ describe("exportToCSV", () => {
     expect(lines[1]).toContain('"Lager ""Special"""');
   });
 
-  it("handles null SKU and bin location", () => {
+  it("handles null SKU, bin, and available", () => {
     const items: PickListItem[] = [
       {
         productTitle: "Lager",
@@ -274,14 +290,16 @@ describe("exportToCSV", () => {
         sku: null,
         variantGid: "gid://1",
         quantity: 10,
-        binLocation: null,
+        binName: null,
+        binSortOrder: Number.MAX_SAFE_INTEGER,
+        available: null,
       },
     ];
 
     const csv = exportToCSV(items);
     const lines = csv.split("\n");
 
-    expect(lines[1]).toBe("Lager,Single,,10,");
+    expect(lines[1]).toBe("Lager,Single,,,10,");
   });
 
   it("handles empty array", () => {
@@ -289,7 +307,7 @@ describe("exportToCSV", () => {
     const lines = csv.split("\n");
 
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toBe("Product,Variant,SKU,Quantity,Bin Location");
+    expect(lines[0]).toBe("Product,Variant,SKU,Available,Quantity,Bin");
   });
 });
 
