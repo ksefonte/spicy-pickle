@@ -158,33 +158,42 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     syncMap.set(b.parentGid, b.syncEnabled);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const products: ProductSummary[] = (productsData?.nodes ?? []).map(
-    (p: any) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const variants: any[] = p.variants?.nodes ?? [];
-      let configuredCount = 0;
-      let syncEnabledCount = 0;
+  interface GqlVariantNode {
+    id: string;
+    metafield?: { value: string } | null;
+  }
+  interface GqlProductNode {
+    id: string;
+    title: string;
+    totalVariants: number;
+    variants?: { nodes?: GqlVariantNode[] };
+  }
 
-      for (const v of variants) {
-        const val = v.metafield?.value;
-        if (val && val !== "[]") {
-          configuredCount++;
-        }
-        if (syncMap.get(v.id)) {
-          syncEnabledCount++;
-        }
+  const products: ProductSummary[] = (
+    (productsData?.nodes ?? []) as GqlProductNode[]
+  ).map((p) => {
+    const variants: GqlVariantNode[] = p.variants?.nodes ?? [];
+    let configuredCount = 0;
+    let syncEnabledCount = 0;
+
+    for (const v of variants) {
+      const val = v.metafield?.value;
+      if (val && val !== "[]") {
+        configuredCount++;
       }
+      if (syncMap.get(v.id)) {
+        syncEnabledCount++;
+      }
+    }
 
-      return {
-        gid: p.id as string,
-        title: p.title as string,
-        variantCount: p.totalVariants as number,
-        configuredCount,
-        hasSyncEnabled: syncEnabledCount,
-      };
-    },
-  );
+    return {
+      gid: p.id,
+      title: p.title,
+      variantCount: p.totalVariants,
+      configuredCount,
+      hasSyncEnabled: syncEnabledCount,
+    };
+  });
 
   return {
     products,
