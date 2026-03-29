@@ -163,30 +163,70 @@ During stock takes (100+ inventory changes in rapid succession), reading from Sh
 
 ---
 
-## Phase 5: Consider Bundles Tab Consolidation
+## Phase 5: Bundles Tab Consolidation — Product Relationships Page
 
-The Migration page has effectively superseded the Bundles tab for defining same-product relationships. Options:
+The Migration page has an in-app relationship editor (product detail modal), but it's only accessible via the migration scan table. The Bundles tab still exists separately and writes to the same metaobject system. This creates a fragmented experience.
 
-### Option A: Keep Both (Recommended Short Term)
+### Goal
 
-- **Migration tab**: Bulk auto-configuration from `bundle_base` / `bundle_quant` metafields
-- **Bundles tab**: Manual configuration, mixed packs, fine-tuning
-- Both write to metaobjects → Prisma
+Replace the existing **Bundles** tab with a dedicated **Product Relationships** page that serves as the single management interface for all product relationships.
 
-### Option B: Merge into Single "Relationships" Tab
+### Route: `app/routes/app.relationships._index.tsx`
 
-- Replace both with a unified UI
-- Product list with expandable variant configuration
-- Auto-detect from metafields + manual override
-- Would require significant UI work
+**URL:** `/app/relationships` (replaces `/app/bundles` in navigation)
 
-### Option C: Read-Only Bundles Tab
+### UI
 
-- Bundles tab becomes read-only, showing data from Prisma
-- All editing happens in Shopify admin (metaobject entries) or via the Migration page
-- Simplest to implement but loses in-app editing
+```
+┌──────────────────────────────────────────────────────────┐
+│ Product Relationships                                     │
+├──────────────────────────────────────────────────────────┤
+│                                                           │
+│  Search: [______________________]  Category: [All ▾]     │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │ Product             │ Variants │ Configured │       │ │
+│  ├─────────────────────┼──────────┼────────────┼───────┤ │
+│  │ Pernicious Weed     │ 6        │ 5/6        │ View  │ │
+│  │ Hāpi Daze           │ 5        │ 5/5        │ View  │ │
+│  │ Summer Dozen (mixed) │ 1       │ 1/1        │ View  │ │
+│  │ Fat Cat             │ 4        │ 0/4        │ View  │ │
+│  └─────────────────────┴──────────┴────────────┴───────┘ │
+│                                                           │
+│  Showing 4 of 437 products  [< Prev] Page 1 of 22 [Next >]│
+│                                                           │
+└──────────────────────────────────────────────────────────┘
+```
 
-**Recommendation**: Option A for now. The Bundles tab handles mixed packs and `expandOnPick` (which doesn't exist in metaobjects), so it still has a role. Transition to Option B as the app matures.
+### Features
+
+1. **Product browser**: Paginated, searchable list of ALL products in the store (not just scanned/migrated ones). Each row shows the product name, variant count, and how many variants have at least one product relationship configured.
+
+2. **Product detail modal**: Clicking "View" opens the same modal used on the migration page, showing every variant with its resolved relationships (metaobject GID, child variant name, SKU, quantity). Includes Add/Remove/Fix Attachments actions.
+
+3. **Sync status**: Show `syncEnabled` per bundle (from the sync config plan) alongside the relationship data, so users can see at a glance which products are actively syncing.
+
+4. **Mixed pack support**: The modal allows adding arbitrary child variants (not just same-product base units), supporting mixed packs like "Summer Dozen" that reference variants from multiple products.
+
+5. **expandOnPick toggle**: Exposed in the modal per variant, controlling whether the pick list expands this bundle to its components.
+
+### Data source
+
+The product list is fetched from Shopify GraphQL (paginated `products` query). For each product, the "configured" count comes from checking which variants have a non-empty `custom.product_relationships` metafield. This can be fetched inline with the product query or resolved client-side from the modal.
+
+### Migration page relationship
+
+The Migration page remains as a **bulk auto-configuration** tool — it reads `bundle_base`/`bundle_quant` metafields and generates relationships in bulk. The Product Relationships page is for **browsing, manual editing, and ongoing management**.
+
+Both pages share the same product detail modal component and the same server-side relationship CRUD functions.
+
+### Bundles tab deprecation
+
+Once the Product Relationships page is live:
+
+- Remove the old Bundles routes (`app.bundles.*`)
+- Update navigation: replace "Bundles" with "Product Relationships"
+- The Quick Setup and Import routes can be kept as sub-routes under the new page if still needed, or consolidated into the modal workflow
 
 ---
 
@@ -197,10 +237,12 @@ The Migration page has effectively superseded the Bundles tab for defining same-
 | **Done**  | Migration writes both metaobjects + Prisma    | —      | Inventory sync works for migrated products |
 | **Done**  | Dynamic field key discovery                   | —      | Adapts to any metaobject definition        |
 | **Done**  | Post-migration product refresh + cache update | —      | UI reflects changes immediately            |
-| **Next**  | Background sync (metaobjects → Prisma)        | Medium | Catches external edits                     |
-| **Next**  | Update Bundle CRUD to write metaobjects       | Medium | Single source of truth                     |
-| **Later** | Deprecate JSON metafield                      | Low    | Cleanup                                    |
-| **Later** | Bundles tab consolidation                     | High   | UX improvement                             |
+| **Done**  | Background sync (metaobjects → Prisma)        | —      | Catches external edits                     |
+| **Done**  | Update Bundle CRUD to write metaobjects       | —      | Single source of truth                     |
+| **Done**  | Deprecate JSON metafield                      | —      | Cleanup                                    |
+| **Done**  | In-app relationship editor (migration modal)  | —      | View/add/remove relationships in-app       |
+| **Next**  | Product Relationships page                    | High   | Unified management UI                      |
+| **Later** | Remove old Bundles routes                     | Low    | Cleanup                                    |
 
 ---
 
