@@ -71,73 +71,73 @@ export async function syncMetaobjectsToPrisma(
     create: { id: shopId },
   });
 
-  // Step 3: Collect all parentGids we're about to upsert
-  const activeParentGids = new Set<string>();
-
-  for (const rel of variantRelationships) {
-    activeParentGids.add(rel.parentVariantGid);
-
-    const existing = await prisma.bundle.findUnique({
-      where: {
-        shopId_parentGid: { shopId, parentGid: rel.parentVariantGid },
-      },
-    });
-
-    await prisma.bundle.upsert({
-      where: {
-        shopId_parentGid: { shopId, parentGid: rel.parentVariantGid },
-      },
-      update: {
-        parentTitle: rel.parentTitle,
-        parentSku: rel.parentSku,
-        children: {
-          deleteMany: {},
-          create: rel.children.map((c) => ({
-            childGid: c.childGid,
-            quantity: c.quantity,
-          })),
-        },
-      },
-      create: {
-        shopId,
-        parentGid: rel.parentVariantGid,
-        parentTitle: rel.parentTitle,
-        parentSku: rel.parentSku,
-        children: {
-          create: rel.children.map((c) => ({
-            childGid: c.childGid,
-            quantity: c.quantity,
-          })),
-        },
-      },
-    });
-
-    if (existing) {
-      stats.updated++;
-    } else {
-      stats.created++;
-    }
-  }
-
-  // Step 4: Delete Prisma bundles that no longer exist as metaobjects
-  const orphanedBundles = await prisma.bundle.findMany({
-    where: {
-      shopId,
-      parentGid: { notIn: Array.from(activeParentGids) },
-    },
-    select: { id: true },
+  // Step 3: Fetch all existing bundles in one query for fast lookup
+  const activeParentGids = new Set(
+    variantRelationships.map((r) => r.parentVariantGid),
+  );
+  const existingBundles = await prisma.bundle.findMany({
+    where: { shopId },
+    select: { id: true, parentGid: true },
   });
+  const existingGids = new Set(existingBundles.map((b) => b.parentGid));
 
-  if (orphanedBundles.length > 0) {
-    await prisma.bundle.deleteMany({
-      where: {
-        id: { in: orphanedBundles.map((b) => b.id) },
-      },
-    });
-    stats.deleted = orphanedBundles.length;
+  // Step 4: Batch upserts in chunks to avoid overwhelming the DB
+  const BATCH_SIZE = 20;
+  for (let i = 0; i < variantRelationships.length; i += BATCH_SIZE) {
+    const batch = variantRelationships.slice(i, i + BATCH_SIZE);
+    await Promise.all(
+      batch.map(async (rel) => {
+        await prisma.bundle.upsert({
+          where: {
+            shopId_parentGid: { shopId, parentGid: rel.parentVariantGid },
+          },
+          update: {
+            parentTitle: rel.parentTitle,
+            parentSku: rel.parentSku,
+            children: {
+              deleteMany: {},
+              create: rel.children.map((c) => ({
+                childGid: c.childGid,
+                quantity: c.quantity,
+              })),
+            },
+          },
+          create: {
+            shopId,
+            parentGid: rel.parentVariantGid,
+            parentTitle: rel.parentTitle,
+            parentSku: rel.parentSku,
+            children: {
+              create: rel.children.map((c) => ({
+                childGid: c.childGid,
+                quantity: c.quantity,
+              })),
+            },
+          },
+        });
+
+        if (existingGids.has(rel.parentVariantGid)) {
+          stats.updated++;
+        } else {
+          stats.created++;
+        }
+      }),
+    );
   }
 
-  // Step 5: Update sync timestamp
+  // Step 5: Delete Prisma bundles that no longer exist as metaobjects
+  const orphanGids = existingBundles
+    .filter((b) => !activeParentGids.has(b.parentGid))
+    .map((b) => b.id);
+
+  if (orphanGids.length > 0) {
+    await prisma.bundle.deleteMany({
+      where: { id: { in: orphanGids } },
+    });
+    stats.deleted = orphanGids.length;
+  }
+
+  // Step 6: Update sync timestamp
   await prisma.shop.update({
     where: { id: shopId },
     data: { lastMetaobjectSyncAt: new Date() },
@@ -230,7 +230,7 @@ async function fetchAllVariantRelationships(
       `,
       {
         variables: {
-          first: 50,
+          first: 250,
           after: cursor,
           ns: ATTACHMENT_NAMESPACE,
           key: ATTACHMENT_KEY,
@@ -333,7 +333,7 @@ async function fetchAllMetaobjects(
       {
         variables: {
           type: METAOBJECT_TYPE,
-          first: 50,
+          first: 250,
           after: cursor,
         },
       },

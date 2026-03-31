@@ -4,7 +4,7 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -98,6 +98,23 @@ type BundleRow = LoaderData["bundles"][number];
 
 type FilterValue = "all" | "enabled" | "disabled";
 
+function extractProductName(parentTitle: string | null): string {
+  if (!parentTitle) return "Unknown Product";
+  const idx = parentTitle.lastIndexOf(" - ");
+  return idx > 0 ? parentTitle.substring(0, idx) : parentTitle;
+}
+
+function extractVariantName(parentTitle: string | null): string {
+  if (!parentTitle) return "—";
+  const idx = parentTitle.lastIndexOf(" - ");
+  return idx > 0 ? parentTitle.substring(idx + 3) : parentTitle;
+}
+
+interface ProductGroup {
+  productName: string;
+  bundles: BundleRow[];
+}
+
 export default function SyncConfigPage() {
   const { shop, bundles } = useLoaderData<LoaderData>();
   const fetcher = useFetcher();
@@ -105,6 +122,9 @@ export default function SyncConfigPage() {
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [statusFilter, setStatusFilter] = useState<FilterValue>("all");
+  const [expandedProducts, setExpandedProducts] = useState<Set<string>>(
+    new Set(),
+  );
 
   const isBusy = fetcher.state !== "idle";
 
@@ -113,6 +133,21 @@ export default function SyncConfigPage() {
     if (statusFilter === "disabled") return !b.syncEnabled;
     return true;
   });
+
+  const productGroups = useMemo(() => {
+    const groupMap = new Map<string, BundleRow[]>();
+    for (const b of filteredBundles) {
+      const name = extractProductName(b.parentTitle);
+      const arr = groupMap.get(name) ?? [];
+      arr.push(b);
+      groupMap.set(name, arr);
+    }
+    const groups: ProductGroup[] = [];
+    for (const [productName, groupBundles] of groupMap) {
+      groups.push({ productName, bundles: groupBundles });
+    }
+    return groups.sort((a, b) => a.productName.localeCompare(b.productName));
+  }, [filteredBundles]);
 
   const allVisibleSelected =
     filteredBundles.length > 0 &&
@@ -135,6 +170,28 @@ export default function SyncConfigPage() {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectProduct = (group: ProductGroup) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = group.bundles.every((b) => next.has(b.id));
+      if (allSelected) {
+        for (const b of group.bundles) next.delete(b.id);
+      } else {
+        for (const b of group.bundles) next.add(b.id);
+      }
+      return next;
+    });
+  };
+
+  const toggleExpanded = (productName: string) => {
+    setExpandedProducts((prev) => {
+      const next = new Set(prev);
+      if (next.has(productName)) next.delete(productName);
+      else next.add(productName);
       return next;
     });
   };
@@ -259,7 +316,7 @@ export default function SyncConfigPage() {
             </div>
           </s-stack>
 
-          <s-stack direction="inline" gap="base">
+          <s-stack direction="inline" gap="base" alignItems="center">
             <s-checkbox
               label="Select All Visible"
               checked={allVisibleSelected || undefined}
@@ -308,7 +365,7 @@ export default function SyncConfigPage() {
                     }}
                   />
                   <th style={{ padding: "12px 8px", fontWeight: 600 }}>
-                    Bundle Name
+                    Product / Variant
                   </th>
                   <th style={{ padding: "12px 8px", fontWeight: 600 }}>SKU</th>
                   <th style={{ padding: "12px 8px", fontWeight: 600 }}>
@@ -326,7 +383,7 @@ export default function SyncConfigPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredBundles.length === 0 ? (
+                {productGroups.length === 0 ? (
                   <tr>
                     <td
                       colSpan={5}
@@ -342,57 +399,45 @@ export default function SyncConfigPage() {
                     </td>
                   </tr>
                 ) : (
-                  filteredBundles.map((bundle: BundleRow) => (
-                    <tr
-                      key={bundle.id}
-                      style={{
-                        borderBottom: "1px solid var(--p-color-border-subdued)",
-                      }}
-                    >
-                      <td style={{ padding: "10px 8px" }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(bundle.id)}
-                          onChange={() => toggleSelect(bundle.id)}
-                        />
-                      </td>
-                      <td style={{ padding: "10px 8px", fontWeight: 500 }}>
-                        {bundle.parentTitle ?? "\u2014"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 8px",
-                          color: "#6d7175",
-                          fontFamily: "monospace",
-                          fontSize: "13px",
-                        }}
-                      >
-                        {bundle.parentSku ?? "\u2014"}
-                      </td>
-                      <td style={{ padding: "10px 8px" }}>
-                        {bundle._count.children}
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 8px",
-                          textAlign: "center",
-                        }}
-                      >
-                        <SyncToggle
-                          enabled={bundle.syncEnabled}
-                          onToggle={() => handleToggleBundle(bundle.id)}
-                          disabled={isBusy}
-                        />
-                      </td>
-                    </tr>
-                  ))
+                  productGroups.map((group) => {
+                    const isExpanded = expandedProducts.has(group.productName);
+                    const allGroupSelected = group.bundles.every((b) =>
+                      selectedIds.has(b.id),
+                    );
+                    const someGroupSelected =
+                      !allGroupSelected &&
+                      group.bundles.some((b) => selectedIds.has(b.id));
+                    const enabledCount = group.bundles.filter(
+                      (b) => b.syncEnabled,
+                    ).length;
+
+                    return (
+                      <ProductGroupRows
+                        key={group.productName}
+                        group={group}
+                        isExpanded={isExpanded}
+                        allSelected={allGroupSelected}
+                        someSelected={someGroupSelected}
+                        selectedIds={selectedIds}
+                        enabledCount={enabledCount}
+                        isBusy={isBusy}
+                        onToggleExpand={() => toggleExpanded(group.productName)}
+                        onToggleSelectProduct={() => toggleSelectProduct(group)}
+                        onToggleSelectBundle={toggleSelect}
+                        onToggleBundle={handleToggleBundle}
+                      />
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
 
           <s-text tone="neutral">
-            Showing {filteredBundles.length} of {bundles.length} bundles
+            {productGroups.length} product
+            {productGroups.length !== 1 ? "s" : ""} ({filteredBundles.length}{" "}
+            variant{filteredBundles.length !== 1 ? "s" : ""}) of{" "}
+            {bundles.length} total
           </s-text>
         </s-stack>
       </s-section>
@@ -409,9 +454,140 @@ export default function SyncConfigPage() {
             The global toggle must be enabled for any individual bundle sync to
             take effect.
           </s-paragraph>
+          <s-paragraph>
+            Click a product row to expand its variants. Use the product-level
+            checkbox to select or deselect all variants at once.
+          </s-paragraph>
         </s-stack>
       </s-section>
     </s-page>
+  );
+}
+
+function ProductGroupRows({
+  group,
+  isExpanded,
+  allSelected,
+  someSelected,
+  selectedIds,
+  enabledCount,
+  isBusy,
+  onToggleExpand,
+  onToggleSelectProduct,
+  onToggleSelectBundle,
+  onToggleBundle,
+}: {
+  group: ProductGroup;
+  isExpanded: boolean;
+  allSelected: boolean;
+  someSelected: boolean;
+  selectedIds: Set<string>;
+  enabledCount: number;
+  isBusy: boolean;
+  onToggleExpand: () => void;
+  onToggleSelectProduct: () => void;
+  onToggleSelectBundle: (id: string) => void;
+  onToggleBundle: (id: string) => void;
+}) {
+  return (
+    <>
+      {/* Product header row */}
+      <tr
+        style={{
+          borderBottom: "1px solid var(--p-color-border-subdued)",
+          backgroundColor: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+          cursor: "pointer",
+        }}
+        onClick={onToggleExpand}
+      >
+        <td
+          style={{ padding: "10px 8px" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someSelected;
+            }}
+            onChange={onToggleSelectProduct}
+          />
+        </td>
+        <td style={{ padding: "10px 8px", fontWeight: 600 }} colSpan={2}>
+          <span style={{ marginRight: "6px", fontSize: "10px" }}>
+            {isExpanded ? "▼" : "▶"}
+          </span>
+          {group.productName}
+          <span
+            style={{
+              marginLeft: "8px",
+              fontSize: "12px",
+              color: "#6d7175",
+              fontWeight: 400,
+            }}
+          >
+            {group.bundles.length} variant
+            {group.bundles.length !== 1 ? "s" : ""}
+          </span>
+        </td>
+        <td />
+        <td
+          style={{
+            padding: "10px 8px",
+            textAlign: "center",
+            fontSize: "12px",
+            color: "#6d7175",
+          }}
+        >
+          {enabledCount}/{group.bundles.length}
+        </td>
+      </tr>
+
+      {/* Variant rows (visible when expanded) */}
+      {isExpanded &&
+        group.bundles.map((bundle) => (
+          <tr
+            key={bundle.id}
+            style={{
+              borderBottom: "1px solid var(--p-color-border-subdued)",
+            }}
+          >
+            <td style={{ padding: "8px 8px 8px 24px" }}>
+              <input
+                type="checkbox"
+                checked={selectedIds.has(bundle.id)}
+                onChange={() => onToggleSelectBundle(bundle.id)}
+              />
+            </td>
+            <td style={{ padding: "8px", paddingLeft: "32px" }}>
+              {extractVariantName(bundle.parentTitle)}
+            </td>
+            <td
+              style={{
+                padding: "8px",
+                color: "#6d7175",
+                fontFamily: "monospace",
+                fontSize: "13px",
+              }}
+            >
+              {bundle.parentSku ?? "—"}
+            </td>
+            <td style={{ padding: "8px" }}>{bundle._count.children}</td>
+            <td
+              style={{
+                padding: "8px",
+                textAlign: "center",
+              }}
+            >
+              <SyncToggle
+                enabled={bundle.syncEnabled}
+                onToggle={() => onToggleBundle(bundle.id)}
+                disabled={isBusy}
+              />
+            </td>
+          </tr>
+        ))}
+    </>
   );
 }
 

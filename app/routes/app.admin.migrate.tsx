@@ -169,6 +169,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ) as ProductMigrationInfo[];
     const readyProducts = selectedProducts.filter((p) => p.status === "ready");
     const summary = await migrateAllReady(admin, readyProducts, session.shop);
+
+    await syncMetaobjectsToPrisma(admin, session.shop);
+
     return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
 
@@ -177,6 +180,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     void detection;
     const products = await scanProducts(admin);
     const summary = await migrateAllReady(admin, products, session.shop);
+
+    await syncMetaobjectsToPrisma(admin, session.shop);
+
     return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
 

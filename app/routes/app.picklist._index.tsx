@@ -240,40 +240,89 @@ export default function PickListIndex() {
           </s-stack>
 
           <s-stack direction="inline" gap="base">
-            <s-select
-              label="Mode"
-              value={mode}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setMode(target.value as "standard" | "resolved");
-              }}
-            >
-              <option value="standard">Standard</option>
-              <option value="resolved">Base Unit Resolution</option>
-            </s-select>
-            <s-select
-              label="Sort by"
-              value={sortBy}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setSortBy(target.value as SortField);
-              }}
-            >
-              <option value="bin">Bin Location</option>
-              <option value="product">Product</option>
-              <option value="quantity">Quantity</option>
-            </s-select>
-            <s-select
-              label="Direction"
-              value={sortDirection}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setSortDirection(target.value as SortDirection);
-              }}
-            >
-              <option value="asc">Ascending</option>
-              <option value="desc">Descending</option>
-            </s-select>
+            <div>
+              <label
+                htmlFor="picklist-mode"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Mode
+              </label>
+              <select
+                id="picklist-mode"
+                value={mode}
+                onChange={(e) =>
+                  setMode(e.target.value as "standard" | "resolved")
+                }
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="standard">Standard</option>
+                <option value="resolved">Base Unit Resolution</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="picklist-sort"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Sort by
+              </label>
+              <select
+                id="picklist-sort"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortField)}
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="bin">Bin Location</option>
+                <option value="product">Product</option>
+                <option value="quantity">Quantity</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="picklist-direction"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Direction
+              </label>
+              <select
+                id="picklist-direction"
+                value={sortDirection}
+                onChange={(e) =>
+                  setSortDirection(e.target.value as SortDirection)
+                }
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </div>
           </s-stack>
 
           <s-button onClick={handleGenerate} disabled={isLoading}>
