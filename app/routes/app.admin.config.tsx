@@ -9,6 +9,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+const PAGE_SIZE = 20;
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -141,6 +143,7 @@ export default function SyncConfigPage() {
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(
     new Set(),
   );
+  const [page, setPage] = useState(0);
 
   const isBusy = fetcher.state !== "idle";
 
@@ -164,6 +167,12 @@ export default function SyncConfigPage() {
     }
     return groups.sort((a, b) => a.productName.localeCompare(b.productName));
   }, [filteredBundles]);
+
+  const totalPages = Math.max(1, Math.ceil(productGroups.length / PAGE_SIZE));
+  const pagedGroups = productGroups.slice(
+    page * PAGE_SIZE,
+    (page + 1) * PAGE_SIZE,
+  );
 
   const allVisibleSelected =
     filteredBundles.length > 0 &&
@@ -251,6 +260,7 @@ export default function SyncConfigPage() {
   const handleSearchChange = (e: Event) => {
     const target = e.target as HTMLInputElement;
     const value = target.value;
+    setPage(0);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       if (value) {
@@ -267,8 +277,12 @@ export default function SyncConfigPage() {
   ).length;
 
   return (
-    <s-page heading="Sync Configuration">
-      <s-section heading="Global Sync">
+    <s-page heading="Configuration">
+      {/* ── Pick List Defaults ── */}
+      <PickListDefaults shop={shop} isBusy={isBusy} />
+
+      {/* ── Global Sync ── */}
+      <s-section heading="Inventory Sync">
         <s-stack direction="block" gap="base">
           <s-paragraph>
             When enabled, inventory changes to child variants automatically
@@ -292,7 +306,8 @@ export default function SyncConfigPage() {
         </s-stack>
       </s-section>
 
-      <s-section heading="Bundle Sync Status">
+      {/* ── Bundle Sync Status ── */}
+      <s-section heading="Per-Bundle Sync">
         <s-stack direction="block" gap="base">
           <s-stack direction="inline" gap="base">
             <div style={{ flex: 1, minWidth: "200px" }}>
@@ -317,7 +332,10 @@ export default function SyncConfigPage() {
               <select
                 id="sync-status-filter"
                 value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value as FilterValue)}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value as FilterValue);
+                  setPage(0);
+                }}
                 style={{
                   padding: "8px 12px",
                   border: "1px solid var(--p-color-border)",
@@ -334,7 +352,7 @@ export default function SyncConfigPage() {
 
           <s-stack direction="inline" gap="base" alignItems="center">
             <s-checkbox
-              label="Select All Visible"
+              label={`Select All (${filteredBundles.length})`}
               checked={allVisibleSelected || undefined}
               onChange={toggleSelectAll}
             />
@@ -399,7 +417,7 @@ export default function SyncConfigPage() {
                 </tr>
               </thead>
               <tbody>
-                {productGroups.length === 0 ? (
+                {pagedGroups.length === 0 ? (
                   <tr>
                     <td
                       colSpan={5}
@@ -415,7 +433,7 @@ export default function SyncConfigPage() {
                     </td>
                   </tr>
                 ) : (
-                  productGroups.map((group) => {
+                  pagedGroups.map((group) => {
                     const isExpanded = expandedProducts.has(group.productName);
                     const allGroupSelected = group.bundles.every((b) =>
                       selectedIds.has(b.id),
@@ -449,173 +467,77 @@ export default function SyncConfigPage() {
             </table>
           </div>
 
-          <s-text tone="neutral">
-            {productGroups.length} product
-            {productGroups.length !== 1 ? "s" : ""} ({filteredBundles.length}{" "}
-            variant{filteredBundles.length !== 1 ? "s" : ""}) of{" "}
-            {bundles.length} total
-          </s-text>
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <s-stack
+              direction="inline"
+              gap="small"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <s-text tone="neutral">
+                Page {page + 1} of {totalPages} ({productGroups.length} product
+                {productGroups.length !== 1 ? "s" : ""},{" "}
+                {filteredBundles.length} variant
+                {filteredBundles.length !== 1 ? "s" : ""})
+              </s-text>
+              <s-stack direction="inline" gap="small">
+                <s-button
+                  variant="tertiary"
+                  disabled={page === 0 || undefined}
+                  onClick={() => setPage(page - 1)}
+                >
+                  Previous
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  disabled={page >= totalPages - 1 || undefined}
+                  onClick={() => setPage(page + 1)}
+                >
+                  Next
+                </s-button>
+              </s-stack>
+            </s-stack>
+          )}
+
+          {totalPages <= 1 && (
+            <s-text tone="neutral">
+              {productGroups.length} product
+              {productGroups.length !== 1 ? "s" : ""} ({filteredBundles.length}{" "}
+              variant{filteredBundles.length !== 1 ? "s" : ""})
+            </s-text>
+          )}
         </s-stack>
       </s-section>
 
-      <PickListDefaults shop={shop} isBusy={isBusy} />
-
-      <s-section slot="aside" heading="About Sync Configuration">
-        <s-stack direction="block" gap="base">
-          <s-paragraph>
-            Control which bundles participate in automatic inventory
-            synchronization. When a child variant&apos;s inventory level
-            changes, enabled bundles will automatically recalculate the
-            parent&apos;s available quantity.
-          </s-paragraph>
-          <s-paragraph>
-            The global toggle must be enabled for any individual bundle sync to
-            take effect.
-          </s-paragraph>
-          <s-paragraph>
-            Click a product row to expand its variants. Use the product-level
-            checkbox to select or deselect all variants at once.
-          </s-paragraph>
-        </s-stack>
-      </s-section>
-
-      <s-section slot="aside" heading="About Pick List Defaults">
+      {/* ── Aside panels ── */}
+      <s-section slot="aside" heading="Pick List Defaults">
         <s-paragraph>
           These settings control which orders are included when generating a
           pick list. They are applied automatically each time so you don&apos;t
           have to configure them on every run.
         </s-paragraph>
       </s-section>
+
+      <s-section slot="aside" heading="Sync Configuration">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Control which bundles participate in automatic inventory
+            synchronization. The global toggle must be enabled for any
+            individual bundle sync to take effect.
+          </s-paragraph>
+          <s-paragraph>
+            Click a product row to expand its variants. Use the product-level
+            checkbox to select or deselect all variants at once. &quot;Select
+            All&quot; operates across all pages.
+          </s-paragraph>
+        </s-stack>
+      </s-section>
     </s-page>
   );
 }
 
-function ProductGroupRows({
-  group,
-  isExpanded,
-  allSelected,
-  someSelected,
-  selectedIds,
-  enabledCount,
-  isBusy,
-  onToggleExpand,
-  onToggleSelectProduct,
-  onToggleSelectBundle,
-  onToggleBundle,
-}: {
-  group: ProductGroup;
-  isExpanded: boolean;
-  allSelected: boolean;
-  someSelected: boolean;
-  selectedIds: Set<string>;
-  enabledCount: number;
-  isBusy: boolean;
-  onToggleExpand: () => void;
-  onToggleSelectProduct: () => void;
-  onToggleSelectBundle: (id: string) => void;
-  onToggleBundle: (id: string) => void;
-}) {
-  return (
-    <>
-      {/* Product header row */}
-      <tr
-        style={{
-          borderBottom: "1px solid var(--p-color-border-subdued)",
-          backgroundColor: "var(--p-color-bg-surface-secondary, #f6f6f7)",
-          cursor: "pointer",
-        }}
-        onClick={onToggleExpand}
-      >
-        <td
-          style={{ padding: "10px 8px" }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <input
-            type="checkbox"
-            checked={allSelected}
-            ref={(el) => {
-              if (el) el.indeterminate = someSelected;
-            }}
-            onChange={onToggleSelectProduct}
-          />
-        </td>
-        <td style={{ padding: "10px 8px", fontWeight: 600 }} colSpan={2}>
-          <span style={{ marginRight: "6px", fontSize: "10px" }}>
-            {isExpanded ? "▼" : "▶"}
-          </span>
-          {group.productName}
-          <span
-            style={{
-              marginLeft: "8px",
-              fontSize: "12px",
-              color: "#6d7175",
-              fontWeight: 400,
-            }}
-          >
-            {group.bundles.length} variant
-            {group.bundles.length !== 1 ? "s" : ""}
-          </span>
-        </td>
-        <td />
-        <td
-          style={{
-            padding: "10px 8px",
-            textAlign: "center",
-            fontSize: "12px",
-            color: "#6d7175",
-          }}
-        >
-          {enabledCount}/{group.bundles.length}
-        </td>
-      </tr>
-
-      {/* Variant rows (visible when expanded) */}
-      {isExpanded &&
-        group.bundles.map((bundle) => (
-          <tr
-            key={bundle.id}
-            style={{
-              borderBottom: "1px solid var(--p-color-border-subdued)",
-            }}
-          >
-            <td style={{ padding: "8px 8px 8px 24px" }}>
-              <input
-                type="checkbox"
-                checked={selectedIds.has(bundle.id)}
-                onChange={() => onToggleSelectBundle(bundle.id)}
-              />
-            </td>
-            <td style={{ padding: "8px", paddingLeft: "32px" }}>
-              {extractVariantName(bundle.parentTitle)}
-            </td>
-            <td
-              style={{
-                padding: "8px",
-                color: "#6d7175",
-                fontFamily: "monospace",
-                fontSize: "13px",
-              }}
-            >
-              {bundle.parentSku ?? "—"}
-            </td>
-            <td style={{ padding: "8px" }}>{bundle._count.children}</td>
-            <td
-              style={{
-                padding: "8px",
-                textAlign: "center",
-              }}
-            >
-              <SyncToggle
-                enabled={bundle.syncEnabled}
-                onToggle={() => onToggleBundle(bundle.id)}
-                disabled={isBusy}
-              />
-            </td>
-          </tr>
-        ))}
-    </>
-  );
-}
+/* ─── Pick List Defaults ─── */
 
 function PickListDefaults({
   shop,
@@ -670,11 +592,6 @@ function PickListDefaults({
   return (
     <s-section heading="Pick List Defaults">
       <s-stack direction="block" gap="base">
-        <s-paragraph>
-          Default filters applied when generating pick lists. These can still be
-          changed per-run from the Pick List page.
-        </s-paragraph>
-
         <s-stack direction="block" gap="small">
           <s-text type="strong">Order statuses to include:</s-text>
           <s-stack direction="inline" gap="base">
@@ -782,6 +699,135 @@ function PickListDefaults({
     </s-section>
   );
 }
+
+/* ─── Product Group Rows ─── */
+
+function ProductGroupRows({
+  group,
+  isExpanded,
+  allSelected,
+  someSelected,
+  selectedIds,
+  enabledCount,
+  isBusy,
+  onToggleExpand,
+  onToggleSelectProduct,
+  onToggleSelectBundle,
+  onToggleBundle,
+}: {
+  group: ProductGroup;
+  isExpanded: boolean;
+  allSelected: boolean;
+  someSelected: boolean;
+  selectedIds: Set<string>;
+  enabledCount: number;
+  isBusy: boolean;
+  onToggleExpand: () => void;
+  onToggleSelectProduct: () => void;
+  onToggleSelectBundle: (id: string) => void;
+  onToggleBundle: (id: string) => void;
+}) {
+  return (
+    <>
+      <tr
+        style={{
+          borderBottom: "1px solid var(--p-color-border-subdued)",
+          backgroundColor: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+          cursor: "pointer",
+        }}
+        onClick={onToggleExpand}
+      >
+        <td
+          style={{ padding: "10px 8px" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someSelected;
+            }}
+            onChange={onToggleSelectProduct}
+          />
+        </td>
+        <td style={{ padding: "10px 8px", fontWeight: 600 }} colSpan={2}>
+          <span style={{ marginRight: "6px", fontSize: "10px" }}>
+            {isExpanded ? "▼" : "▶"}
+          </span>
+          {group.productName}
+          <span
+            style={{
+              marginLeft: "8px",
+              fontSize: "12px",
+              color: "#6d7175",
+              fontWeight: 400,
+            }}
+          >
+            {group.bundles.length} variant
+            {group.bundles.length !== 1 ? "s" : ""}
+          </span>
+        </td>
+        <td />
+        <td
+          style={{
+            padding: "10px 8px",
+            textAlign: "center",
+            fontSize: "12px",
+            color: "#6d7175",
+          }}
+        >
+          {enabledCount}/{group.bundles.length}
+        </td>
+      </tr>
+
+      {isExpanded &&
+        group.bundles.map((bundle) => (
+          <tr
+            key={bundle.id}
+            style={{
+              borderBottom: "1px solid var(--p-color-border-subdued)",
+            }}
+          >
+            <td style={{ padding: "8px 8px 8px 24px" }}>
+              <input
+                type="checkbox"
+                checked={selectedIds.has(bundle.id)}
+                onChange={() => onToggleSelectBundle(bundle.id)}
+              />
+            </td>
+            <td style={{ padding: "8px", paddingLeft: "32px" }}>
+              {extractVariantName(bundle.parentTitle)}
+            </td>
+            <td
+              style={{
+                padding: "8px",
+                color: "#6d7175",
+                fontFamily: "monospace",
+                fontSize: "13px",
+              }}
+            >
+              {bundle.parentSku ?? "—"}
+            </td>
+            <td style={{ padding: "8px" }}>{bundle._count.children}</td>
+            <td
+              style={{
+                padding: "8px",
+                textAlign: "center",
+              }}
+            >
+              <SyncToggle
+                enabled={bundle.syncEnabled}
+                onToggle={() => onToggleBundle(bundle.id)}
+                disabled={isBusy}
+              />
+            </td>
+          </tr>
+        ))}
+    </>
+  );
+}
+
+/* ─── Sync Toggle ─── */
 
 function SyncToggle({
   enabled,

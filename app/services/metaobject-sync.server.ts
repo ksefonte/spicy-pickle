@@ -94,6 +94,7 @@ export async function syncMetaobjectsToPrisma(
           update: {
             parentTitle: rel.parentTitle,
             parentSku: rel.parentSku,
+            expandOnPick: true,
             children: {
               deleteMany: {},
               create: rel.children.map((c) => ({
@@ -107,6 +108,7 @@ export async function syncMetaobjectsToPrisma(
             parentGid: rel.parentVariantGid,
             parentTitle: rel.parentTitle,
             parentSku: rel.parentSku,
+            expandOnPick: true,
             children: {
               create: rel.children.map((c) => ({
                 childGid: c.childGid,
