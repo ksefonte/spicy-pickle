@@ -49,6 +49,16 @@ model Shop {
   updatedAt            DateTime      @updatedAt
   lastMetaobjectSyncAt DateTime?
   syncEnabled          Boolean       @default(false) // Global inventory sync toggle
+
+  // Pick list default filters
+  picklistUnfulfilled  Boolean       @default(true)
+  picklistPartial      Boolean       @default(true)
+  picklistFulfilled    Boolean       @default(false)
+  picklistShippingOnly Boolean       @default(true)
+  picklistMode         String        @default("standard") // "standard" | "resolved"
+  picklistSortBy       String        @default("bin")      // "bin" | "product" | "quantity"
+  picklistSortDir      String        @default("asc")      // "asc" | "desc"
+
   bundles              Bundle[]
   bins                 Bin[]
   supplierSkus         SupplierSku[]

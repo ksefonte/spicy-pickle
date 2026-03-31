@@ -90,6 +90,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true };
   }
 
+  if (intent === "save_picklist_defaults") {
+    await db.shop.update({
+      where: { id: shop },
+      data: {
+        picklistUnfulfilled: formData.get("picklistUnfulfilled") === "true",
+        picklistPartial: formData.get("picklistPartial") === "true",
+        picklistFulfilled: formData.get("picklistFulfilled") === "true",
+        picklistShippingOnly: formData.get("picklistShippingOnly") === "true",
+        picklistMode: (formData.get("picklistMode") as string) || "standard",
+        picklistSortBy: (formData.get("picklistSortBy") as string) || "bin",
+        picklistSortDir: (formData.get("picklistSortDir") as string) || "asc",
+      },
+    });
+    return { ok: true };
+  }
+
   return { ok: true };
 };
 
@@ -442,6 +458,8 @@ export default function SyncConfigPage() {
         </s-stack>
       </s-section>
 
+      <PickListDefaults shop={shop} isBusy={isBusy} />
+
       <s-section slot="aside" heading="About Sync Configuration">
         <s-stack direction="block" gap="base">
           <s-paragraph>
@@ -459,6 +477,14 @@ export default function SyncConfigPage() {
             checkbox to select or deselect all variants at once.
           </s-paragraph>
         </s-stack>
+      </s-section>
+
+      <s-section slot="aside" heading="About Pick List Defaults">
+        <s-paragraph>
+          These settings control which orders are included when generating a
+          pick list. They are applied automatically each time so you don&apos;t
+          have to configure them on every run.
+        </s-paragraph>
       </s-section>
     </s-page>
   );
@@ -588,6 +614,172 @@ function ProductGroupRows({
           </tr>
         ))}
     </>
+  );
+}
+
+function PickListDefaults({
+  shop,
+  isBusy,
+}: {
+  shop: LoaderData["shop"];
+  isBusy: boolean;
+}) {
+  const fetcher = useFetcher();
+
+  const [unfulfilled, setUnfulfilled] = useState(shop.picklistUnfulfilled);
+  const [partial, setPartial] = useState(shop.picklistPartial);
+  const [fulfilled, setFulfilled] = useState(shop.picklistFulfilled);
+  const [shippingOnly, setShippingOnly] = useState(shop.picklistShippingOnly);
+  const [mode, setMode] = useState(shop.picklistMode);
+  const [sortBy, setSortBy] = useState(shop.picklistSortBy);
+  const [sortDir, setSortDir] = useState(shop.picklistSortDir);
+
+  const hasChanges =
+    unfulfilled !== shop.picklistUnfulfilled ||
+    partial !== shop.picklistPartial ||
+    fulfilled !== shop.picklistFulfilled ||
+    shippingOnly !== shop.picklistShippingOnly ||
+    mode !== shop.picklistMode ||
+    sortBy !== shop.picklistSortBy ||
+    sortDir !== shop.picklistSortDir;
+
+  const handleSave = () => {
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "save_picklist_defaults",
+        picklistUnfulfilled: String(unfulfilled),
+        picklistPartial: String(partial),
+        picklistFulfilled: String(fulfilled),
+        picklistShippingOnly: String(shippingOnly),
+        picklistMode: mode,
+        picklistSortBy: sortBy,
+        picklistSortDir: sortDir,
+      },
+      { method: "POST" },
+    );
+  };
+
+  const selectStyle = {
+    padding: "8px 12px",
+    border: "1px solid var(--p-color-border)",
+    borderRadius: "4px",
+    fontSize: "14px",
+  };
+
+  return (
+    <s-section heading="Pick List Defaults">
+      <s-stack direction="block" gap="base">
+        <s-paragraph>
+          Default filters applied when generating pick lists. These can still be
+          changed per-run from the Pick List page.
+        </s-paragraph>
+
+        <s-stack direction="block" gap="small">
+          <s-text type="strong">Order statuses to include:</s-text>
+          <s-stack direction="inline" gap="base">
+            <s-checkbox
+              label="Unfulfilled"
+              checked={unfulfilled || undefined}
+              onChange={() => setUnfulfilled(!unfulfilled)}
+              disabled={isBusy || undefined}
+            />
+            <s-checkbox
+              label="Partially fulfilled"
+              checked={partial || undefined}
+              onChange={() => setPartial(!partial)}
+              disabled={isBusy || undefined}
+            />
+            <s-checkbox
+              label="Fulfilled"
+              checked={fulfilled || undefined}
+              onChange={() => setFulfilled(!fulfilled)}
+              disabled={isBusy || undefined}
+            />
+          </s-stack>
+        </s-stack>
+
+        <s-checkbox
+          label="Requires shipping only"
+          checked={shippingOnly || undefined}
+          onChange={() => setShippingOnly(!shippingOnly)}
+          disabled={isBusy || undefined}
+        />
+
+        <s-stack direction="inline" gap="base">
+          <div>
+            <label
+              htmlFor="cfg-picklist-mode"
+              style={{
+                display: "block",
+                fontSize: "12px",
+                marginBottom: "4px",
+              }}
+            >
+              Mode
+            </label>
+            <select
+              id="cfg-picklist-mode"
+              value={mode}
+              onChange={(e) => setMode(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="standard">Standard</option>
+              <option value="resolved">Base Unit Resolution</option>
+            </select>
+          </div>
+          <div>
+            <label
+              htmlFor="cfg-picklist-sort"
+              style={{
+                display: "block",
+                fontSize: "12px",
+                marginBottom: "4px",
+              }}
+            >
+              Sort by
+            </label>
+            <select
+              id="cfg-picklist-sort"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="bin">Bin Location</option>
+              <option value="product">Product</option>
+              <option value="quantity">Quantity</option>
+            </select>
+          </div>
+          <div>
+            <label
+              htmlFor="cfg-picklist-dir"
+              style={{
+                display: "block",
+                fontSize: "12px",
+                marginBottom: "4px",
+              }}
+            >
+              Direction
+            </label>
+            <select
+              id="cfg-picklist-dir"
+              value={sortDir}
+              onChange={(e) => setSortDir(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="asc">Ascending</option>
+              <option value="desc">Descending</option>
+            </select>
+          </div>
+        </s-stack>
+
+        {hasChanges && (
+          <s-button onClick={handleSave} disabled={isBusy || undefined}>
+            Save Defaults
+          </s-button>
+        )}
+      </s-stack>
+    </s-section>
   );
 }
 

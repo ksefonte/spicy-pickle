@@ -7,6 +7,7 @@ import { useLoaderData, useFetcher } from "react-router";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import db from "../db.server";
 import {
   generatePickList,
   exportToCSV,
@@ -22,7 +23,13 @@ interface ActionData {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  const shop = await db.shop.upsert({
+    where: { id: session.shop },
+    update: {},
+    create: { id: session.shop },
+  });
 
   const today = new Date();
   const thirtyDaysAgo = new Date(today);
@@ -31,6 +38,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     defaultStartDate: thirtyDaysAgo.toISOString().split("T")[0],
     defaultEndDate: today.toISOString().split("T")[0],
+    defaults: {
+      unfulfilled: shop.picklistUnfulfilled,
+      partial: shop.picklistPartial,
+      fulfilled: shop.picklistFulfilled,
+      shippingOnly: shop.picklistShippingOnly,
+      mode: shop.picklistMode as "standard" | "resolved",
+      sortBy: shop.picklistSortBy as SortField,
+      sortDir: shop.picklistSortDir as SortDirection,
+    },
   };
 };
 
@@ -46,6 +62,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const endDateStr = formData.get("endDate") as string | null;
     const includeUnfulfilled = formData.get("unfulfilled") === "true";
     const includePartial = formData.get("partial") === "true";
+    const includeFulfilled = formData.get("fulfilled") === "true";
     const sortBy = (formData.get("sortBy") as SortField) ?? "bin";
     const sortDirection =
       (formData.get("sortDirection") as SortDirection) ?? "asc";
@@ -59,9 +76,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           ? false
           : undefined;
 
-    const statuses: ("unfulfilled" | "partially_fulfilled")[] = [];
+    const statuses: ("unfulfilled" | "partially_fulfilled" | "fulfilled")[] =
+      [];
     if (includeUnfulfilled) statuses.push("unfulfilled");
     if (includePartial) statuses.push("partially_fulfilled");
+    if (includeFulfilled) statuses.push("fulfilled");
 
     if (statuses.length === 0) {
       return { error: "Please select at least one order status" } as ActionData;
@@ -110,17 +129,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function PickListIndex() {
-  const { defaultStartDate, defaultEndDate } = useLoaderData<typeof loader>();
+  const { defaultStartDate, defaultEndDate, defaults } =
+    useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
 
   const [startDate, setStartDate] = useState(defaultStartDate);
   const [endDate, setEndDate] = useState(defaultEndDate);
-  const [includeUnfulfilled, setIncludeUnfulfilled] = useState(true);
-  const [includePartial, setIncludePartial] = useState(true);
-  const [sortBy, setSortBy] = useState<SortField>("bin");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
-  const [mode, setMode] = useState<"standard" | "resolved">("standard");
-  const [requiresShipping, setRequiresShipping] = useState(true);
+  const [sortBy, setSortBy] = useState<SortField>(defaults.sortBy);
+  const [sortDirection, setSortDirection] = useState<SortDirection>(
+    defaults.sortDir,
+  );
+  const [mode, setMode] = useState<"standard" | "resolved">(defaults.mode);
 
   const isLoading =
     fetcher.state === "submitting" || fetcher.state === "loading";
@@ -133,12 +152,13 @@ export default function PickListIndex() {
     formData.set("intent", "generate");
     formData.set("startDate", startDate ?? "");
     formData.set("endDate", endDate ?? "");
-    formData.set("unfulfilled", String(includeUnfulfilled));
-    formData.set("partial", String(includePartial));
+    formData.set("unfulfilled", String(defaults.unfulfilled));
+    formData.set("partial", String(defaults.partial));
+    formData.set("fulfilled", String(defaults.fulfilled));
     formData.set("sortBy", sortBy);
     formData.set("sortDirection", sortDirection);
     formData.set("mode", mode);
-    formData.set("requiresShipping", String(requiresShipping));
+    formData.set("requiresShipping", String(defaults.shippingOnly));
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(formData, { method: "POST" });
   };
@@ -166,6 +186,12 @@ export default function PickListIndex() {
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  const activeFilters: string[] = [];
+  if (defaults.unfulfilled) activeFilters.push("Unfulfilled");
+  if (defaults.partial) activeFilters.push("Partially fulfilled");
+  if (defaults.fulfilled) activeFilters.push("Fulfilled");
+  if (defaults.shippingOnly) activeFilters.push("Shipping only");
 
   return (
     <s-page heading="Pick List Generator">
@@ -210,33 +236,6 @@ export default function PickListIndex() {
                 }}
               />
             </div>
-          </s-stack>
-
-          <s-stack direction="inline" gap="base">
-            <s-checkbox
-              label="Unfulfilled orders"
-              checked={includeUnfulfilled}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setIncludeUnfulfilled(target.checked);
-              }}
-            />
-            <s-checkbox
-              label="Partially fulfilled orders"
-              checked={includePartial}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setIncludePartial(target.checked);
-              }}
-            />
-            <s-checkbox
-              label="Requires shipping only"
-              checked={requiresShipping}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setRequiresShipping(target.checked);
-              }}
-            />
           </s-stack>
 
           <s-stack direction="inline" gap="base">
@@ -324,6 +323,16 @@ export default function PickListIndex() {
               </select>
             </div>
           </s-stack>
+
+          <s-text tone="neutral">
+            Filters: {activeFilters.join(", ") || "None"} —{" "}
+            <a
+              href="/app/admin/config"
+              style={{ color: "var(--p-color-text-interactive, #2c6ecb)" }}
+            >
+              Change defaults
+            </a>
+          </s-text>
 
           <s-button onClick={handleGenerate} disabled={isLoading}>
             {isLoading ? "Generating..." : "Generate Pick List"}
