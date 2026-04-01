@@ -18,7 +18,13 @@ import {
   removeSingleRelationship,
   reattachProductRelationships,
 } from "../services/metaobject-writes.server";
-import { syncMetaobjectsToPrisma } from "../services/metaobject-sync.server";
+import {
+  syncMetaobjectsToPrisma,
+  findOrphanedMetaobjects,
+  deleteOrphanedMetaobjects,
+  reattachOrphanToVariant,
+  type OrphanedMetaobject,
+} from "../services/metaobject-sync.server";
 
 // ============================================================================
 // Types
@@ -67,6 +73,22 @@ interface ToggleSyncResult {
   syncEnabled: boolean;
 }
 
+interface ScanOrphansResult {
+  intent: "scan_orphans";
+  orphans: OrphanedMetaobject[];
+}
+
+interface DeleteOrphansResult {
+  intent: "delete_orphans";
+  deleted: number;
+  failed: number;
+}
+
+interface ReattachOrphanResult {
+  intent: "reattach_orphan";
+  success: boolean;
+}
+
 interface ErrorResult {
   intent: "error";
   error: string;
@@ -78,6 +100,9 @@ type ActionResult =
   | RemoveRelationshipResult
   | ReattachResult
   | ToggleSyncResult
+  | ScanOrphansResult
+  | DeleteOrphansResult
+  | ReattachOrphanResult
   | ErrorResult;
 
 interface SelectedVariant {
@@ -231,7 +256,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const childGid = formData.get("childGid") as string;
     const quantity = parseInt(formData.get("quantity") as string, 10);
     await addSingleRelationship(admin, variantGid, childGid, quantity);
-    await syncMetaobjectsToPrisma(admin, shop);
+    try {
+      await syncMetaobjectsToPrisma(admin, shop);
+    } catch (e) {
+      console.error("[Sync] Post-add sync failed:", e);
+    }
     return {
       intent: "add_relationship",
       success: true,
@@ -242,7 +271,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const variantGid = formData.get("variantGid") as string;
     const metaobjectGid = formData.get("metaobjectGid") as string;
     await removeSingleRelationship(admin, variantGid, metaobjectGid);
-    await syncMetaobjectsToPrisma(admin, shop);
+    try {
+      await syncMetaobjectsToPrisma(admin, shop);
+    } catch (e) {
+      console.error("[Sync] Post-remove sync failed:", e);
+    }
     return {
       intent: "remove_relationship",
       success: true,
@@ -272,6 +305,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       intent: "toggle_sync",
       syncEnabled: updated.syncEnabled,
     } satisfies ToggleSyncResult;
+  }
+
+  if (intent === "scan_orphans") {
+    const orphans = await findOrphanedMetaobjects(admin);
+    return { intent: "scan_orphans", orphans } satisfies ScanOrphansResult;
+  }
+
+  if (intent === "delete_orphans") {
+    const gids = JSON.parse(formData.get("gids") as string) as string[];
+    const result = await deleteOrphanedMetaobjects(admin, gids);
+    return {
+      intent: "delete_orphans",
+      ...result,
+    } satisfies DeleteOrphansResult;
+  }
+
+  if (intent === "reattach_orphan") {
+    const metaobjectGid = formData.get("metaobjectGid") as string;
+    const variantGid = formData.get("variantGid") as string;
+    await reattachOrphanToVariant(admin, metaobjectGid, variantGid);
+    return {
+      intent: "reattach_orphan",
+      success: true,
+    } satisfies ReattachOrphanResult;
   }
 
   return { intent: "error", error: "Unknown intent" } satisfies ErrorResult;
@@ -555,6 +612,8 @@ export default function ProductRelationshipsPage() {
         </s-stack>
       </s-section>
 
+      <OrphanSection />
+
       {modalProductGid && (
         <ProductDetailModal
           productGid={modalProductGid}
@@ -563,6 +622,369 @@ export default function ProductRelationshipsPage() {
         />
       )}
     </s-page>
+  );
+}
+
+// ============================================================================
+// Orphaned Metaobjects Section
+// ============================================================================
+
+function OrphanSection() {
+  const fetcher = useFetcher<ActionResult>();
+  const shopify = useAppBridge();
+  const [orphans, setOrphans] = useState<OrphanedMetaobject[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reattachGid, setReattachGid] = useState<string | null>(null);
+
+  const isBusy = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (!fetcher.data) return;
+
+    if ("orphans" in fetcher.data) {
+      setOrphans(fetcher.data.orphans);
+      setSelected(new Set());
+    }
+
+    if ("deleted" in fetcher.data) {
+      void shopify.toast.show(
+        `Deleted ${fetcher.data.deleted} orphan${fetcher.data.deleted !== 1 ? "s" : ""}` +
+          (fetcher.data.failed > 0 ? ` (${fetcher.data.failed} failed)` : ""),
+      );
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      fetcher.submit({ intent: "scan_orphans" }, { method: "POST" });
+    }
+
+    if (
+      "success" in fetcher.data &&
+      fetcher.data.intent === "reattach_orphan"
+    ) {
+      void shopify.toast.show("Orphan reattached successfully");
+      setReattachGid(null);
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      fetcher.submit({ intent: "scan_orphans" }, { method: "POST" });
+    }
+  }, [fetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleSelect = (gid: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (!orphans) return;
+    if (selected.size === orphans.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(orphans.map((o) => o.gid)));
+    }
+  };
+
+  const handleDelete = () => {
+    if (selected.size === 0) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "delete_orphans", gids: JSON.stringify([...selected]) },
+      { method: "POST" },
+    );
+  };
+
+  const handleReattach = (variantGid: string) => {
+    if (!reattachGid) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      { intent: "reattach_orphan", metaobjectGid: reattachGid, variantGid },
+      { method: "POST" },
+    );
+  };
+
+  const openReattachPicker = async (metaobjectGid: string) => {
+    setReattachGid(metaobjectGid);
+    const sel = await shopify.resourcePicker({
+      type: "product",
+      multiple: false,
+      action: "select",
+      filter: { variants: true },
+    });
+    const product = sel?.[0];
+    const variant = product?.variants?.[0];
+    if (variant?.id) {
+      handleReattach(variant.id);
+    } else {
+      setReattachGid(null);
+    }
+  };
+
+  return (
+    <s-section heading="Orphaned Metaobjects">
+      <s-stack direction="block" gap="base">
+        <s-text>
+          Orphaned product_relationship metaobjects exist in your Shopify store
+          but are not attached to any variant. These can accumulate from failed
+          deletions or manual edits.
+        </s-text>
+
+        {orphans === null ? (
+          <button
+            type="button"
+            disabled={isBusy}
+            onClick={() => {
+              // eslint-disable-next-line @typescript-eslint/no-floating-promises
+              fetcher.submit({ intent: "scan_orphans" }, { method: "POST" });
+            }}
+            style={{
+              padding: "8px 20px",
+              fontSize: "14px",
+              borderRadius: "8px",
+              border: "1px solid #2c6ecb",
+              background: "#2c6ecb",
+              color: "white",
+              cursor: isBusy ? "not-allowed" : "pointer",
+              fontWeight: 600,
+              opacity: isBusy ? 0.6 : 1,
+            }}
+          >
+            {isBusy ? "Scanning..." : "Scan for Orphans"}
+          </button>
+        ) : orphans.length === 0 ? (
+          <div
+            style={{
+              padding: "20px",
+              textAlign: "center",
+              background: "#f1f8f5",
+              borderRadius: "8px",
+              border: "1px solid #c9e8d9",
+            }}
+          >
+            <s-text tone="success">
+              <strong>No orphaned metaobjects found.</strong>
+            </s-text>
+            <div style={{ marginTop: "8px" }}>
+              <button
+                type="button"
+                disabled={isBusy}
+                onClick={() => {
+                  // eslint-disable-next-line @typescript-eslint/no-floating-promises
+                  fetcher.submit(
+                    { intent: "scan_orphans" },
+                    { method: "POST" },
+                  );
+                }}
+                style={{
+                  padding: "6px 14px",
+                  fontSize: "13px",
+                  borderRadius: "6px",
+                  border: "1px solid #c9cccf",
+                  background: "white",
+                  color: "#202223",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                Rescan
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <s-text>
+                Found{" "}
+                <strong>
+                  {orphans.length} orphan{orphans.length !== 1 ? "s" : ""}
+                </strong>
+              </s-text>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => {
+                    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+                    fetcher.submit(
+                      { intent: "scan_orphans" },
+                      { method: "POST" },
+                    );
+                  }}
+                  style={{
+                    padding: "6px 14px",
+                    fontSize: "13px",
+                    borderRadius: "6px",
+                    border: "1px solid #c9cccf",
+                    background: "white",
+                    color: "#202223",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  Rescan
+                </button>
+                <button
+                  type="button"
+                  disabled={selected.size === 0 || isBusy}
+                  onClick={handleDelete}
+                  style={{
+                    padding: "6px 14px",
+                    fontSize: "13px",
+                    borderRadius: "6px",
+                    border: "1px solid #d82c0d",
+                    background: selected.size > 0 ? "#d82c0d" : "#f6f6f7",
+                    color: selected.size > 0 ? "white" : "#8c9196",
+                    cursor:
+                      selected.size > 0 && !isBusy ? "pointer" : "not-allowed",
+                    fontWeight: 600,
+                  }}
+                >
+                  Delete Selected ({selected.size})
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                border: "1px solid #e0e0e0",
+                borderRadius: "8px",
+                overflow: "hidden",
+              }}
+            >
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: "14px",
+                }}
+              >
+                <thead>
+                  <tr
+                    style={{
+                      background: "#f9fafb",
+                      borderBottom: "1px solid #e0e0e0",
+                      textAlign: "left",
+                    }}
+                  >
+                    <th style={{ padding: "10px 12px", width: "40px" }}>
+                      <input
+                        type="checkbox"
+                        checked={selected.size === orphans.length}
+                        onChange={toggleAll}
+                      />
+                    </th>
+                    <th style={{ padding: "10px 12px", fontWeight: 600 }}>
+                      Child Variant
+                    </th>
+                    <th
+                      style={{
+                        padding: "10px 12px",
+                        fontWeight: 600,
+                        width: "80px",
+                        textAlign: "center",
+                      }}
+                    >
+                      Qty
+                    </th>
+                    <th
+                      style={{
+                        padding: "10px 12px",
+                        fontWeight: 600,
+                        width: "200px",
+                        textAlign: "center",
+                      }}
+                    >
+                      Metaobject ID
+                    </th>
+                    <th
+                      style={{
+                        padding: "10px 12px",
+                        fontWeight: 600,
+                        width: "120px",
+                        textAlign: "right",
+                      }}
+                    >
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orphans.map((orphan) => (
+                    <tr
+                      key={orphan.gid}
+                      style={{ borderBottom: "1px solid #f0f0f0" }}
+                    >
+                      <td style={{ padding: "10px 12px" }}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(orphan.gid)}
+                          onChange={() => toggleSelect(orphan.gid)}
+                        />
+                      </td>
+                      <td style={{ padding: "10px 12px" }}>
+                        {orphan.childTitle ?? (
+                          <span
+                            style={{ color: "#8c9196", fontStyle: "italic" }}
+                          >
+                            Unknown variant
+                          </span>
+                        )}
+                      </td>
+                      <td
+                        style={{
+                          padding: "10px 12px",
+                          textAlign: "center",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {orphan.quantity}
+                      </td>
+                      <td
+                        style={{
+                          padding: "10px 12px",
+                          textAlign: "center",
+                          fontFamily: "monospace",
+                          fontSize: "12px",
+                          color: "#6d7175",
+                        }}
+                      >
+                        {extractShopifyId(orphan.gid)}
+                      </td>
+                      <td style={{ padding: "10px 12px", textAlign: "right" }}>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => {
+                            void openReattachPicker(orphan.gid);
+                          }}
+                          style={{
+                            padding: "4px 10px",
+                            fontSize: "12px",
+                            borderRadius: "4px",
+                            border: "1px solid #2c6ecb",
+                            background: "white",
+                            color: "#2c6ecb",
+                            cursor: isBusy ? "not-allowed" : "pointer",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Reattach
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </s-stack>
+    </s-section>
   );
 }
 
@@ -625,13 +1047,20 @@ function ProductDetailModal({
   const isBusy = fetcher.state !== "idle";
 
   const openChildPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: false,
       action: "select",
+      filter: { variants: true },
     });
-    if (selection && selection.length > 0) {
-      setAddChild(selection[0] as SelectedVariant);
+    const product = selected?.[0];
+    const variant = product?.variants?.[0];
+    if (variant?.id && product) {
+      setAddChild({
+        id: variant.id,
+        title: variant.title ?? "Default Title",
+        product: { title: product.title },
+      });
     }
   };
 

@@ -175,9 +175,277 @@ interface VariantRelationship {
   }>;
 }
 
+export interface OrphanedMetaobject {
+  gid: string;
+  childGid: string;
+  quantity: number;
+  childTitle: string | null;
+}
+
 interface MetaobjectFieldMapResult {
   childKey: string;
   quantityKey: string;
+}
+
+/**
+ * Finds product_relationship metaobjects that exist in Shopify but are not
+ * referenced by any variant's custom.product_relationships metafield.
+ */
+export async function findOrphanedMetaobjects(
+  admin: AdminApiContext,
+): Promise<OrphanedMetaobject[]> {
+  const fieldMap = await getMetaobjectFieldMap(admin);
+
+  const allMetaobjects = await fetchAllMetaobjects(admin, fieldMap);
+  const attachedGids = await collectAttachedMetaobjectGids(admin);
+
+  const orphanEntries: Array<{
+    gid: string;
+    childGid: string;
+    quantity: number;
+  }> = [];
+  for (const [gid, data] of allMetaobjects) {
+    if (!attachedGids.has(gid)) {
+      orphanEntries.push({ gid, ...data });
+    }
+  }
+
+  if (orphanEntries.length === 0) return [];
+
+  const childGids = [...new Set(orphanEntries.map((o) => o.childGid))];
+  const titleMap = await resolveVariantTitles(admin, childGids);
+
+  return orphanEntries.map((o) => ({
+    gid: o.gid,
+    childGid: o.childGid,
+    quantity: o.quantity,
+    childTitle: titleMap.get(o.childGid) ?? null,
+  }));
+}
+
+/**
+ * Deletes a list of orphaned metaobjects from Shopify.
+ */
+export async function deleteOrphanedMetaobjects(
+  admin: AdminApiContext,
+  metaobjectGids: string[],
+): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+
+  for (const gid of metaobjectGids) {
+    try {
+      await admin.graphql(
+        `#graphql
+          mutation DeleteMetaobject($id: ID!) {
+            metaobjectDelete(id: $id) {
+              deletedId
+              userErrors { field message }
+            }
+          }
+        `,
+        { variables: { id: gid } },
+      );
+      deleted++;
+    } catch {
+      failed++;
+    }
+  }
+
+  return { deleted, failed };
+}
+
+/**
+ * Reattaches an orphaned metaobject to a specific variant by appending
+ * it to that variant's custom.product_relationships list metafield.
+ */
+export async function reattachOrphanToVariant(
+  admin: AdminApiContext,
+  metaobjectGid: string,
+  variantGid: string,
+): Promise<void> {
+  const existing = await getVariantAttachments(admin, variantGid);
+  const updated = [...existing, metaobjectGid];
+
+  await admin.graphql(
+    `#graphql
+      mutation SetVariantRelationships($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          userErrors { field message }
+        }
+      }
+    `,
+    {
+      variables: {
+        metafields: [
+          {
+            ownerId: variantGid,
+            namespace: ATTACHMENT_NAMESPACE,
+            key: ATTACHMENT_KEY,
+            type: "list.metaobject_reference",
+            value: JSON.stringify(updated),
+          },
+        ],
+      },
+    },
+  );
+}
+
+// ============================================================================
+// Internal helpers for orphan detection
+// ============================================================================
+
+/**
+ * Scans all variants and collects every metaobject GID referenced in
+ * custom.product_relationships metafields.
+ */
+async function collectAttachedMetaobjectGids(
+  admin: AdminApiContext,
+): Promise<Set<string>> {
+  const attached = new Set<string>();
+  let cursor: string | null = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const response = await admin.graphql(
+      `#graphql
+        query GetVariantAttachments($first: Int!, $after: String, $ns: String!, $key: String!) {
+          productVariants(first: $first, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              metafield(namespace: $ns, key: $key) { value }
+            }
+          }
+        }
+      `,
+      {
+        variables: {
+          first: 250,
+          after: cursor,
+          ns: ATTACHMENT_NAMESPACE,
+          key: ATTACHMENT_KEY,
+        },
+      },
+    );
+
+    const data = (await response.json()) as {
+      data?: {
+        productVariants?: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: Array<{ metafield: { value: string } | null }>;
+        };
+      };
+    };
+
+    const variants = data.data?.productVariants;
+    if (!variants) break;
+
+    for (const v of variants.nodes) {
+      if (!v.metafield?.value) continue;
+      try {
+        const gids = JSON.parse(v.metafield.value) as string[];
+        if (Array.isArray(gids)) {
+          for (const g of gids) attached.add(g);
+        }
+      } catch {
+        // skip malformed
+      }
+    }
+
+    hasNextPage = variants.pageInfo.hasNextPage;
+    cursor = variants.pageInfo.endCursor;
+  }
+
+  return attached;
+}
+
+/**
+ * Resolves variant GIDs to human-readable "Product - Variant" titles.
+ */
+async function resolveVariantTitles(
+  admin: AdminApiContext,
+  variantGids: string[],
+): Promise<Map<string, string>> {
+  const titles = new Map<string, string>();
+  if (variantGids.length === 0) return titles;
+
+  const BATCH = 50;
+  for (let i = 0; i < variantGids.length; i += BATCH) {
+    const batch = variantGids.slice(i, i + BATCH);
+    const response = await admin.graphql(
+      `#graphql
+        query ResolveVariants($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              title
+              product { title }
+            }
+          }
+        }
+      `,
+      { variables: { ids: batch } },
+    );
+
+    const data = (await response.json()) as {
+      data?: {
+        nodes?: Array<{
+          id?: string;
+          title?: string;
+          product?: { title: string };
+        } | null>;
+      };
+    };
+
+    for (const node of data.data?.nodes ?? []) {
+      if (!node?.id) continue;
+      const label =
+        node.title === "Default Title"
+          ? (node.product?.title ?? node.id)
+          : `${node.product?.title ?? "?"} - ${node.title}`;
+      titles.set(node.id, label);
+    }
+  }
+
+  return titles;
+}
+
+/**
+ * Gets existing metaobject GIDs attached to a variant's metafield.
+ */
+async function getVariantAttachments(
+  admin: AdminApiContext,
+  variantGid: string,
+): Promise<string[]> {
+  const response = await admin.graphql(
+    `#graphql
+      query GetAttachments($id: ID!, $ns: String!, $key: String!) {
+        productVariant(id: $id) {
+          metafield(namespace: $ns, key: $key) { value }
+        }
+      }
+    `,
+    {
+      variables: {
+        id: variantGid,
+        ns: ATTACHMENT_NAMESPACE,
+        key: ATTACHMENT_KEY,
+      },
+    },
+  );
+
+  const data = (await response.json()) as {
+    data?: { productVariant?: { metafield?: { value: string } | null } };
+  };
+
+  const raw = data.data?.productVariant?.metafield?.value;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 // ============================================================================
@@ -271,13 +539,20 @@ async function fetchAllVariantRelationships(
       if (!Array.isArray(metaobjectGids) || metaobjectGids.length === 0)
         continue;
 
-      const children: Array<{ childGid: string; quantity: number }> = [];
+      const childMap = new Map<string, number>();
       for (const gid of metaobjectGids) {
         const mo = metaobjectLookup.get(gid);
         if (mo) {
-          children.push(mo);
+          childMap.set(
+            mo.childGid,
+            (childMap.get(mo.childGid) ?? 0) + mo.quantity,
+          );
         }
       }
+      const children = Array.from(childMap, ([childGid, quantity]) => ({
+        childGid,
+        quantity,
+      }));
 
       if (children.length > 0) {
         relationships.push({

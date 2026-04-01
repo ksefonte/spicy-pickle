@@ -170,7 +170,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const readyProducts = selectedProducts.filter((p) => p.status === "ready");
     const summary = await migrateAllReady(admin, readyProducts, session.shop);
 
-    await syncMetaobjectsToPrisma(admin, session.shop);
+    try {
+      await syncMetaobjectsToPrisma(admin, session.shop);
+    } catch (e) {
+      console.error("[Sync] Post-migration sync failed:", e);
+    }
 
     return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
@@ -181,7 +185,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const products = await scanProducts(admin);
     const summary = await migrateAllReady(admin, products, session.shop);
 
-    await syncMetaobjectsToPrisma(admin, session.shop);
+    try {
+      await syncMetaobjectsToPrisma(admin, session.shop);
+    } catch (e) {
+      console.error("[Sync] Post-migration sync failed:", e);
+    }
 
     return { intent: "migrate_all", summary } satisfies MigrateAllResult;
   }
@@ -1364,13 +1372,20 @@ function ProductDetailModal({
   const isBusy = fetcher.state !== "idle";
 
   const openChildPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: false,
       action: "select",
+      filter: { variants: true },
     });
-    if (selection && selection.length > 0) {
-      setAddChild(selection[0] as SelectedVariant);
+    const product = selected?.[0];
+    const variant = product?.variants?.[0];
+    if (variant?.id && product) {
+      setAddChild({
+        id: variant.id,
+        title: variant.title ?? "Default Title",
+        product: { title: product.title },
+      });
     }
   };
 

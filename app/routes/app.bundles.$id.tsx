@@ -206,23 +206,34 @@ export default function EditBundle() {
   };
 
   const openChildPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: true,
       action: "select",
+      filter: { variants: true },
     });
+    if (!selected || selected.length === 0) return;
 
-    if (selection && selection.length > 0) {
-      const newChildren = (selection as SelectedVariant[]).map((variant) => ({
-        gid: variant.id,
-        title: getDisplayTitle(variant),
-        quantity: 1,
-      }));
-
-      const existingGids = new Set(children.map((c) => c.gid));
-      const toAdd = newChildren.filter((c) => !existingGids.has(c.gid));
-      setChildren([...children, ...toAdd]);
+    const newChildren: Array<{ gid: string; title: string; quantity: number }> =
+      [];
+    for (const product of selected) {
+      for (const v of product.variants ?? []) {
+        if (!v.id) continue;
+        newChildren.push({
+          gid: v.id,
+          title: getDisplayTitle({
+            id: v.id,
+            title: v.title ?? "Default Title",
+            product: { title: product.title },
+          }),
+          quantity: 1,
+        });
+      }
     }
+
+    const existingGids = new Set(children.map((c) => c.gid));
+    const toAdd = newChildren.filter((c) => !existingGids.has(c.gid));
+    setChildren([...children, ...toAdd]);
   };
 
   const updateChildQuantity = (gid: string, quantity: number) => {

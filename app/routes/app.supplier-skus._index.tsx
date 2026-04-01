@@ -233,15 +233,21 @@ export default function SupplierSkusIndex() {
   };
 
   const openVariantPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: false,
       action: "select",
+      filter: { variants: true },
     });
-
-    if (selection && selection.length > 0) {
-      const variant = selection[0] as SelectedVariant;
-      setNewVariant(variant);
+    const product = selected?.[0];
+    const variant = product?.variants?.[0];
+    if (variant?.id && product) {
+      setNewVariant({
+        id: variant.id,
+        title: variant.title ?? "Default Title",
+        sku: variant.sku ?? undefined,
+        product: { title: product.title },
+      });
     }
   };
 
