@@ -484,24 +484,17 @@ export default function BundlesQuickSetup() {
         </s-section>
       )}
 
-      <s-section slot="aside" heading="How it Works">
+      <s-section slot="aside" heading="Quick Setup (Legacy)">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Quick Setup creates one bundle per non-base variant, with the base
-            variant as the child component.
+            Creates one local bundle per non-base variant, with the base variant
+            as the child component. For new setups, use the{" "}
+            <s-link href="/app/admin/migrate">Migration</s-link> page to
+            generate product_relationship metaobjects directly in Shopify.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Example:</s-text> If you have a product with
-            Single, 4-Pack, and 24-Pack variants:
-          </s-paragraph>
-          <ul style={{ margin: 0, paddingLeft: "20px" }}>
-            <li>Select &quot;Single&quot; as the base</li>
-            <li>4-Pack → 4 singles</li>
-            <li>24-Pack → 24 singles</li>
-          </ul>
-          <s-paragraph>
-            When inventory for Single changes, the availability of 4-Pack and
-            24-Pack will automatically update.
+            <s-text type="strong">Example:</s-text> Single as the base → 4-Pack
+            gets quantity 4, 24-Pack gets quantity 24.
           </s-paragraph>
         </s-stack>
       </s-section>

@@ -54,12 +54,11 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Home</s-link>
-        <s-link href="/app/relationships">Product Relationships</s-link>
-        <s-link href="/app/bundles">Bundles</s-link>
-        <s-link href="/app/locations">Bin Locations</s-link>
-        <s-link href="/app/supplier-skus">Supplier SKUs</s-link>
         <s-link href="/app/picklist">Pick List</s-link>
+        <s-link href="/app/relationships">Product Relationships</s-link>
+        <s-link href="/app/locations">Bin Locations</s-link>
+        <s-link href="/app/bundles">Bundles</s-link>
+        <s-link href="/app/supplier-skus">Supplier SKUs</s-link>
         {showMigration && <s-link href="/app/admin/migrate">Migration</s-link>}
         <s-link href="/app/admin/config">Configuration</s-link>
       </s-app-nav>

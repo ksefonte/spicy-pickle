@@ -513,23 +513,24 @@ export default function SyncConfigPage() {
       {/* ── Aside panels ── */}
       <s-section slot="aside" heading="Pick List Defaults">
         <s-paragraph>
-          These settings control which orders are included when generating a
-          pick list. They are applied automatically each time so you don&apos;t
-          have to configure them on every run.
+          Default order filters and sorting applied when generating pick lists.
+          These can be overridden per-run on the{" "}
+          <s-link href="/app/picklist">Pick List</s-link> page.
         </s-paragraph>
       </s-section>
 
-      <s-section slot="aside" heading="Sync Configuration">
+      <s-section slot="aside" heading="Inventory Sync">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Control which bundles participate in automatic inventory
-            synchronization. The global toggle must be enabled for any
-            individual bundle sync to take effect.
+            The global toggle must be enabled for any sync to run. Use
+            per-bundle toggles to test sync incrementally — enable a few
+            products at a time before switching fully from a third-party bundles
+            app.
           </s-paragraph>
           <s-paragraph>
-            Click a product row to expand its variants. Use the product-level
-            checkbox to select or deselect all variants at once. &quot;Select
-            All&quot; operates across all pages.
+            Expand a product row to see its variants. Use the product-level
+            checkbox to toggle all variants at once. &quot;Select All
+            Visible&quot; operates across all filtered pages.
           </s-paragraph>
         </s-stack>
       </s-section>

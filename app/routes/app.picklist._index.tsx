@@ -501,34 +501,32 @@ export default function PickListIndex() {
       <s-section slot="aside" heading="About Pick Lists">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Generate a consolidated picking list from your orders. Items are
-            aggregated by variant and sorted for efficient warehouse navigation.
+            Generates a consolidated picking list from outstanding orders. Items
+            are aggregated by variant, sorted by bin location, and include
+            available inventory counts.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Bundle expansion:</s-text> Bundles marked with
-            &quot;Expand on pick&quot; will be broken down into their component
-            items.
+            <s-text type="strong">Standard mode:</s-text> Expands bundles with
+            product relationships into their base components so you pick single
+            units. Variants without relationships appear as-is.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Base Unit Resolution:</s-text> Expands ALL
-            bundles to their base components for a fully resolved pick list.
+            <s-text type="strong">Resolved mode:</s-text> Expands ALL bundles to
+            base components for a fully resolved pick list.
           </s-paragraph>
         </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Sorting">
+      <s-section slot="aside" heading="Configuration">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            <s-text type="strong">By Bin Location:</s-text> Default. Optimized
-            for warehouse picking routes.
+            Order filters (unfulfilled, partial, fulfilled, shipping) and
+            default sort/mode settings are managed on the{" "}
+            <s-link href="/app/admin/config">Configuration</s-link> page.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">By Product:</s-text> Groups items by product
-            name.
-          </s-paragraph>
-          <s-paragraph>
-            <s-text type="strong">By Quantity:</s-text> Prioritize high-volume
-            or low-volume items.
+            Bin locations determine sort order. Manage bins on the{" "}
+            <s-link href="/app/locations">Bin Locations</s-link> page.
           </s-paragraph>
         </s-stack>
       </s-section>
