@@ -104,36 +104,52 @@ export default function NewBundle() {
   };
 
   const openParentPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: false,
       action: "select",
+      filter: { variants: true },
     });
-
-    if (selection && selection.length > 0) {
-      const variant = selection[0] as SelectedVariant;
-      setParentVariant(variant);
+    const product = selected?.[0];
+    const variant = product?.variants?.[0];
+    if (variant?.id && product) {
+      setParentVariant({
+        id: variant.id,
+        title: variant.title ?? "Default Title",
+        product: { title: product.title },
+      });
     }
   };
 
   const openChildPicker = async () => {
-    const selection = await shopify.resourcePicker({
-      type: "variant",
+    const selected = await shopify.resourcePicker({
+      type: "product",
       multiple: true,
       action: "select",
+      filter: { variants: true },
     });
+    if (!selected || selected.length === 0) return;
 
-    if (selection && selection.length > 0) {
-      const newChildren = (selection as SelectedVariant[]).map((variant) => ({
-        gid: variant.id,
-        title: getDisplayTitle(variant),
-        quantity: 1,
-      }));
-
-      const existingGids = new Set(children.map((c) => c.gid));
-      const toAdd = newChildren.filter((c) => !existingGids.has(c.gid));
-      setChildren([...children, ...toAdd]);
+    const newChildren: Array<{ gid: string; title: string; quantity: number }> =
+      [];
+    for (const product of selected) {
+      for (const v of product.variants ?? []) {
+        if (!v.id) continue;
+        newChildren.push({
+          gid: v.id,
+          title: getDisplayTitle({
+            id: v.id,
+            title: v.title ?? "Default Title",
+            product: { title: product.title },
+          }),
+          quantity: 1,
+        });
+      }
     }
+
+    const existingGids = new Set(children.map((c) => c.gid));
+    const toAdd = newChildren.filter((c) => !existingGids.has(c.gid));
+    setChildren([...children, ...toAdd]);
   };
 
   const updateChildQuantity = (gid: string, quantity: number) => {
@@ -313,32 +329,21 @@ export default function NewBundle() {
         </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="How it works">
-        <s-ordered-list>
-          <s-list-item>Select the parent variant (the bundle SKU)</s-list-item>
-          <s-list-item>Add child variants with their quantities</s-list-item>
-          <s-list-item>
-            When inventory changes, all linked variants update automatically
-          </s-list-item>
-        </s-ordered-list>
-      </s-section>
-
-      <s-section slot="aside" heading="Example">
-        <s-paragraph>
-          <s-text type="strong">24-Pack Bundle:</s-text>
-        </s-paragraph>
-        <s-paragraph>Parent: &ldquo;Lager - 24 Pack&rdquo; variant</s-paragraph>
-        <s-paragraph>
-          Child: &ldquo;Lager - Single&rdquo; with quantity 24
-        </s-paragraph>
-        <s-paragraph>48 singles in stock → 2 × 24-packs available</s-paragraph>
-      </s-section>
-
-      <s-section slot="aside" heading="Tip">
-        <s-paragraph>
-          Use <s-text type="strong">Quick Setup</s-text> from the bundles list
-          to automatically create bundles for all variants of a single product.
-        </s-paragraph>
+      <s-section slot="aside" heading="Legacy Bundle Creation">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            This page creates bundles directly in the local database. For new
+            setups, use the{" "}
+            <s-link href="/app/relationships">Product Relationships</s-link>{" "}
+            page instead — it writes product_relationship metaobjects to Shopify
+            and syncs automatically.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Example:</s-text> A 24-Pack variant with child
+            quantity 24 linked to the Single variant. 48 singles in stock = 2
+            available 24-packs.
+          </s-paragraph>
+        </s-stack>
       </s-section>
     </s-page>
   );

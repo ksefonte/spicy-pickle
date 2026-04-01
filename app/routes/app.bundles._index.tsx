@@ -450,19 +450,18 @@ export default function BundlesIndex() {
       <s-section slot="aside" heading="About Bundles">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Bundles link a parent product variant to one or more child variants.
-            When inventory changes on any linked variant, all related variants
-            are automatically updated.
+            Bundles are the local cache of{" "}
+            <s-text type="strong">product_relationship</s-text> metaobjects from
+            Shopify. They drive inventory sync and pick list expansion.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Example:</s-text> A 24-Pack variant with
-            quantity 24 linked to a Single variant means 48 singles = 2
-            available 24-packs.
+            To configure relationships, use the{" "}
+            <s-link href="/app/relationships">Product Relationships</s-link>{" "}
+            page. Changes sync here automatically.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Quick Setup</s-text> automatically creates
-            bundles for all variants of a single product (e.g., Single, 4-Pack,
-            6-Pack, 24-Pack).
+            Enable per-bundle sync and pick list expansion on the{" "}
+            <s-link href="/app/admin/config">Configuration</s-link> page.
           </s-paragraph>
         </s-stack>
       </s-section>

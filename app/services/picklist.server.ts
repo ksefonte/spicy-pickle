@@ -17,7 +17,7 @@ export interface PickListFilters {
   shop: string;
   startDate?: Date;
   endDate?: Date;
-  statuses: ("unfulfilled" | "partially_fulfilled")[];
+  statuses: ("unfulfilled" | "partially_fulfilled" | "fulfilled")[];
   orderIds?: string[]; // For manual selection
   requiresShipping?: boolean;
 }
@@ -166,11 +166,18 @@ async function fetchOrdersWithSummaries(
 
   const queryParts: string[] = [];
 
+  const statusParts: string[] = [];
   if (filters.statuses.includes("unfulfilled")) {
-    queryParts.push("fulfillment_status:unfulfilled");
+    statusParts.push("fulfillment_status:unfulfilled");
   }
   if (filters.statuses.includes("partially_fulfilled")) {
-    queryParts.push("fulfillment_status:partial");
+    statusParts.push("fulfillment_status:partial");
+  }
+  if (filters.statuses.includes("fulfilled")) {
+    statusParts.push("fulfillment_status:shipped");
+  }
+  if (statusParts.length > 0) {
+    queryParts.push(`(${statusParts.join(" OR ")})`);
   }
 
   if (filters.startDate) {

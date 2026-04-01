@@ -49,7 +49,7 @@ module.exports = {
         },
       },
       rules: {
-        "react/no-unknown-property": ["error", { ignore: ["variant"] }],
+        "react/no-unknown-property": ["error", { ignore: ["variant", "gap", "emphasis"] }],
       },
     },
 

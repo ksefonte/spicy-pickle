@@ -1,4 +1,8 @@
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type {
+  HeadersFunction,
+  LoaderFunctionArgs,
+  ShouldRevalidateFunctionArgs,
+} from "react-router";
 import { Outlet, useLoaderData, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
@@ -9,24 +13,33 @@ import { syncIfStale } from "../services/metaobject-sync.server";
 
 const SHOW_MIGRATION_PAGE = true;
 
+let setupDone = false;
+
+export function shouldRevalidate({
+  formAction,
+  defaultShouldRevalidate,
+}: ShouldRevalidateFunctionArgs): boolean {
+  if (formAction) return false;
+  return defaultShouldRevalidate;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
 
-  // Ensure product_relationship metaobject + metafield definitions exist.
-  // Idempotent — skips creation if already present.
-  try {
-    await ensureMetaobjectSetup(admin);
-  } catch (error) {
-    console.error("[Setup] Metaobject setup failed:", error);
+  if (!setupDone) {
+    try {
+      await ensureMetaobjectSetup(admin);
+      setupDone = true;
+    } catch (error) {
+      console.error("[Setup] Metaobject setup failed:", error);
+    }
   }
 
-  // Keep Prisma bundle cache in sync with Shopify metaobjects.
-  // Skips if last sync was < 5 minutes ago.
-  try {
-    await syncIfStale(admin, session.shop);
-  } catch (error) {
+  // Fire-and-forget: sync runs in the background so it never blocks page load.
+  // The staleness check inside syncIfStale prevents unnecessary work.
+  syncIfStale(admin, session.shop).catch((error: unknown) => {
     console.error("[Sync] Metaobject sync failed:", error);
-  }
+  });
 
   // eslint-disable-next-line no-undef
   return {
@@ -41,12 +54,11 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Home</s-link>
-        <s-link href="/app/relationships">Product Relationships</s-link>
-        <s-link href="/app/bundles">Bundles</s-link>
-        <s-link href="/app/locations">Bin Locations</s-link>
-        <s-link href="/app/supplier-skus">Supplier SKUs</s-link>
         <s-link href="/app/picklist">Pick List</s-link>
+        <s-link href="/app/relationships">Product Relationships</s-link>
+        <s-link href="/app/locations">Bin Locations</s-link>
+        <s-link href="/app/bundles">Bundles</s-link>
+        <s-link href="/app/supplier-skus">Supplier SKUs</s-link>
         {showMigration && <s-link href="/app/admin/migrate">Migration</s-link>}
         <s-link href="/app/admin/config">Configuration</s-link>
       </s-app-nav>

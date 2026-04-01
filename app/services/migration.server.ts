@@ -340,7 +340,7 @@ export async function scanProducts(
             nodes {
               id
               title
-              variants(first: 100) {
+              variants(first: 25) {
                 nodes {
                   id
                   title
@@ -362,7 +362,7 @@ export async function scanProducts(
       `,
       {
         variables: {
-          first: 50,
+          first: 25,
           after: cursor,
           baseNs: BUNDLE_BASE_NAMESPACE,
           baseKey: BUNDLE_BASE_KEY,

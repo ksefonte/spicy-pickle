@@ -3,10 +3,11 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
-import { useState } from "react";
+import { useLoaderData, useFetcher, useSearchParams } from "react-router";
+import { useState, useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import db from "../db.server";
 import {
   generatePickList,
   exportToCSV,
@@ -22,7 +23,53 @@ interface ActionData {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+
+  const shop = await db.shop.upsert({
+    where: { id: session.shop },
+    update: {},
+    create: { id: session.shop },
+  });
+
+  const url = new URL(request.url);
+
+  let preloadedOrderIds: string[] | null = null;
+
+  // Admin link extensions append ids[] params with numeric order IDs
+  const idsParams = url.searchParams.getAll("ids[]");
+  if (idsParams.length > 0) {
+    preloadedOrderIds = idsParams
+      .filter(Boolean)
+      .map((id) => `gid://shopify/Order/${id}`);
+  }
+
+  // Also support comma-separated format from direct URL
+  if (!preloadedOrderIds) {
+    const ordersParam = url.searchParams.get("orders");
+    if (ordersParam) {
+      preloadedOrderIds = ordersParam
+        .split(",")
+        .filter(Boolean)
+        .map((id) => `gid://shopify/Order/${id}`);
+    }
+  }
+
+  if (!preloadedOrderIds) {
+    const picklistSessionId = url.searchParams.get("session");
+    if (picklistSessionId) {
+      const picklistSession = await db.pickListSession.findUnique({
+        where: { id: picklistSessionId },
+      });
+      if (picklistSession && picklistSession.shopId === session.shop) {
+        try {
+          preloadedOrderIds = JSON.parse(picklistSession.orderIds) as string[];
+        } catch {
+          // ignore corrupted session
+        }
+        await db.pickListSession.delete({ where: { id: picklistSessionId } });
+      }
+    }
+  }
 
   const today = new Date();
   const thirtyDaysAgo = new Date(today);
@@ -31,6 +78,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     defaultStartDate: thirtyDaysAgo.toISOString().split("T")[0],
     defaultEndDate: today.toISOString().split("T")[0],
+    defaults: {
+      unfulfilled: shop.picklistUnfulfilled,
+      partial: shop.picklistPartial,
+      fulfilled: shop.picklistFulfilled,
+      shippingOnly: shop.picklistShippingOnly,
+      mode: shop.picklistMode as "standard" | "resolved",
+      sortBy: shop.picklistSortBy as SortField,
+      sortDir: shop.picklistSortDir as SortDirection,
+    },
+    preloadedOrderIds,
+    autoGenerate: url.searchParams.get("auto") === "true",
+    urlOverrides: {
+      mode: url.searchParams.get("mode") as "standard" | "resolved" | null,
+      unfulfilled: url.searchParams.get("unfulfilled"),
+      partial: url.searchParams.get("partial"),
+      fulfilled: url.searchParams.get("fulfilled"),
+      shippingOnly: url.searchParams.get("shippingOnly"),
+    },
   };
 };
 
@@ -46,6 +111,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const endDateStr = formData.get("endDate") as string | null;
     const includeUnfulfilled = formData.get("unfulfilled") === "true";
     const includePartial = formData.get("partial") === "true";
+    const includeFulfilled = formData.get("fulfilled") === "true";
     const sortBy = (formData.get("sortBy") as SortField) ?? "bin";
     const sortDirection =
       (formData.get("sortDirection") as SortDirection) ?? "asc";
@@ -59,12 +125,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           ? false
           : undefined;
 
-    const statuses: ("unfulfilled" | "partially_fulfilled")[] = [];
+    const statuses: ("unfulfilled" | "partially_fulfilled" | "fulfilled")[] =
+      [];
     if (includeUnfulfilled) statuses.push("unfulfilled");
     if (includePartial) statuses.push("partially_fulfilled");
+    if (includeFulfilled) statuses.push("fulfilled");
 
     if (statuses.length === 0) {
       return { error: "Please select at least one order status" } as ActionData;
+    }
+
+    const orderIdsJson = formData.get("orderIds") as string | null;
+    let orderIds: string[] | undefined;
+    if (orderIdsJson) {
+      try {
+        orderIds = JSON.parse(orderIdsJson) as string[];
+      } catch {
+        // ignore parse error, fall through to date range
+      }
     }
 
     try {
@@ -72,10 +150,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         admin,
         {
           shop,
-          startDate: startDateStr ? new Date(startDateStr) : undefined,
-          endDate: endDateStr ? new Date(endDateStr) : undefined,
+          startDate: orderIds
+            ? undefined
+            : startDateStr
+              ? new Date(startDateStr)
+              : undefined,
+          endDate: orderIds
+            ? undefined
+            : endDateStr
+              ? new Date(endDateStr)
+              : undefined,
           statuses,
           requiresShipping,
+          orderIds,
         },
         sortBy,
         sortDirection,
@@ -110,17 +197,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function PickListIndex() {
-  const { defaultStartDate, defaultEndDate } = useLoaderData<typeof loader>();
+  const {
+    defaultStartDate,
+    defaultEndDate,
+    defaults,
+    preloadedOrderIds,
+    autoGenerate,
+    urlOverrides,
+  } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [startDate, setStartDate] = useState(defaultStartDate);
   const [endDate, setEndDate] = useState(defaultEndDate);
-  const [includeUnfulfilled, setIncludeUnfulfilled] = useState(true);
-  const [includePartial, setIncludePartial] = useState(true);
-  const [sortBy, setSortBy] = useState<SortField>("bin");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
-  const [mode, setMode] = useState<"standard" | "resolved">("standard");
-  const [requiresShipping, setRequiresShipping] = useState(true);
+  const [sortBy, setSortBy] = useState<SortField>(defaults.sortBy);
+  const [sortDirection, setSortDirection] = useState<SortDirection>(
+    defaults.sortDir,
+  );
+  const [mode, setMode] = useState<"standard" | "resolved">(defaults.mode);
+  const [orderIdsFromExtension] = useState<string[] | null>(
+    preloadedOrderIds ?? null,
+  );
+  const autoTriggered = useRef(false);
 
   const isLoading =
     fetcher.state === "submitting" || fetcher.state === "loading";
@@ -128,19 +226,72 @@ export default function PickListIndex() {
   const error = fetcher.data?.error;
   const csv = fetcher.data?.csv;
 
-  const handleGenerate = () => {
+  const submitGenerate = (
+    orderIds?: string[] | null,
+    overrides?: typeof urlOverrides,
+  ) => {
+    const useUnfulfilled =
+      overrides?.unfulfilled != null
+        ? overrides.unfulfilled === "true"
+        : defaults.unfulfilled;
+    const usePartial =
+      overrides?.partial != null
+        ? overrides.partial === "true"
+        : defaults.partial;
+    const useFulfilled =
+      overrides?.fulfilled != null
+        ? overrides.fulfilled === "true"
+        : defaults.fulfilled;
+    const useShipping =
+      overrides?.shippingOnly != null
+        ? overrides.shippingOnly === "true"
+        : defaults.shippingOnly;
+    const useMode = overrides?.mode ?? mode;
+
     const formData = new FormData();
     formData.set("intent", "generate");
     formData.set("startDate", startDate ?? "");
     formData.set("endDate", endDate ?? "");
-    formData.set("unfulfilled", String(includeUnfulfilled));
-    formData.set("partial", String(includePartial));
+    formData.set("unfulfilled", String(useUnfulfilled));
+    formData.set("partial", String(usePartial));
+    formData.set("fulfilled", String(useFulfilled));
     formData.set("sortBy", sortBy);
     formData.set("sortDirection", sortDirection);
-    formData.set("mode", mode);
-    formData.set("requiresShipping", String(requiresShipping));
+    formData.set("mode", useMode);
+    formData.set("requiresShipping", String(useShipping));
+    if (orderIds && orderIds.length > 0) {
+      formData.set("orderIds", JSON.stringify(orderIds));
+    }
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(formData, { method: "POST" });
+  };
+
+  useEffect(() => {
+    if (autoTriggered.current) return;
+    if (orderIdsFromExtension && orderIdsFromExtension.length > 0) {
+      autoTriggered.current = true;
+      submitGenerate(orderIdsFromExtension, urlOverrides);
+      const params = new URLSearchParams(searchParams);
+      params.delete("session");
+      params.delete("orders");
+      params.delete("ids[]");
+      setSearchParams(params, { replace: true });
+    } else if (autoGenerate) {
+      autoTriggered.current = true;
+      submitGenerate(null, urlOverrides);
+      const params = new URLSearchParams(searchParams);
+      params.delete("auto");
+      params.delete("mode");
+      params.delete("unfulfilled");
+      params.delete("partial");
+      params.delete("fulfilled");
+      params.delete("shippingOnly");
+      setSearchParams(params, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleGenerate = () => {
+    submitGenerate(orderIdsFromExtension);
   };
 
   const handleExport = () => {
@@ -166,6 +317,12 @@ export default function PickListIndex() {
     a.click();
     URL.revokeObjectURL(url);
   }
+
+  const activeFilters: string[] = [];
+  if (defaults.unfulfilled) activeFilters.push("Unfulfilled");
+  if (defaults.partial) activeFilters.push("Partially fulfilled");
+  if (defaults.fulfilled) activeFilters.push("Fulfilled");
+  if (defaults.shippingOnly) activeFilters.push("Shipping only");
 
   return (
     <s-page heading="Pick List Generator">
@@ -213,68 +370,113 @@ export default function PickListIndex() {
           </s-stack>
 
           <s-stack direction="inline" gap="base">
-            <s-checkbox
-              label="Unfulfilled orders"
-              checked={includeUnfulfilled}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setIncludeUnfulfilled(target.checked);
-              }}
-            />
-            <s-checkbox
-              label="Partially fulfilled orders"
-              checked={includePartial}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setIncludePartial(target.checked);
-              }}
-            />
-            <s-checkbox
-              label="Requires shipping only"
-              checked={requiresShipping}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLInputElement;
-                setRequiresShipping(target.checked);
-              }}
-            />
+            <div>
+              <label
+                htmlFor="picklist-mode"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Mode
+              </label>
+              <select
+                id="picklist-mode"
+                value={mode}
+                onChange={(e) =>
+                  setMode(e.target.value as "standard" | "resolved")
+                }
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="standard">Standard</option>
+                <option value="resolved">Base Unit Resolution</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="picklist-sort"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Sort by
+              </label>
+              <select
+                id="picklist-sort"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortField)}
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="bin">Bin Location</option>
+                <option value="product">Product</option>
+                <option value="quantity">Quantity</option>
+              </select>
+            </div>
+            <div>
+              <label
+                htmlFor="picklist-direction"
+                style={{
+                  display: "block",
+                  fontSize: "12px",
+                  marginBottom: "4px",
+                }}
+              >
+                Direction
+              </label>
+              <select
+                id="picklist-direction"
+                value={sortDirection}
+                onChange={(e) =>
+                  setSortDirection(e.target.value as SortDirection)
+                }
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--p-color-border)",
+                  borderRadius: "4px",
+                  fontSize: "14px",
+                }}
+              >
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+              </select>
+            </div>
           </s-stack>
 
-          <s-stack direction="inline" gap="base">
-            <s-select
-              label="Mode"
-              value={mode}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setMode(target.value as "standard" | "resolved");
-              }}
+          <s-text tone="neutral">
+            Filters: {activeFilters.join(", ") || "None"} —{" "}
+            <a
+              href="/app/admin/config"
+              style={{ color: "var(--p-color-text-interactive, #2c6ecb)" }}
             >
-              <option value="standard">Standard</option>
-              <option value="resolved">Base Unit Resolution</option>
-            </s-select>
-            <s-select
-              label="Sort by"
-              value={sortBy}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setSortBy(target.value as SortField);
-              }}
-            >
-              <option value="bin">Bin Location</option>
-              <option value="product">Product</option>
-              <option value="quantity">Quantity</option>
-            </s-select>
-            <s-select
-              label="Direction"
-              value={sortDirection}
-              onChange={(e: Event) => {
-                const target = e.target as HTMLSelectElement;
-                setSortDirection(target.value as SortDirection);
-              }}
-            >
-              <option value="asc">Ascending</option>
-              <option value="desc">Descending</option>
-            </s-select>
-          </s-stack>
+              Change defaults
+            </a>
+          </s-text>
+
+          {orderIdsFromExtension && orderIdsFromExtension.length > 0 && (
+            <s-box padding="base" borderRadius="base" background="subdued">
+              <s-text>
+                Generating from{" "}
+                <strong>
+                  {orderIdsFromExtension.length} selected order
+                  {orderIdsFromExtension.length !== 1 ? "s" : ""}
+                </strong>{" "}
+                (via Shopify Orders page).
+              </s-text>
+            </s-box>
+          )}
 
           <s-button onClick={handleGenerate} disabled={isLoading}>
             {isLoading ? "Generating..." : "Generate Pick List"}
@@ -443,34 +645,32 @@ export default function PickListIndex() {
       <s-section slot="aside" heading="About Pick Lists">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            Generate a consolidated picking list from your orders. Items are
-            aggregated by variant and sorted for efficient warehouse navigation.
+            Generates a consolidated picking list from outstanding orders. Items
+            are aggregated by variant, sorted by bin location, and include
+            available inventory counts.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Bundle expansion:</s-text> Bundles marked with
-            &quot;Expand on pick&quot; will be broken down into their component
-            items.
+            <s-text type="strong">Standard mode:</s-text> Expands bundles with
+            product relationships into their base components so you pick single
+            units. Variants without relationships appear as-is.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Base Unit Resolution:</s-text> Expands ALL
-            bundles to their base components for a fully resolved pick list.
+            <s-text type="strong">Resolved mode:</s-text> Expands ALL bundles to
+            base components for a fully resolved pick list.
           </s-paragraph>
         </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Sorting">
+      <s-section slot="aside" heading="Configuration">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            <s-text type="strong">By Bin Location:</s-text> Default. Optimized
-            for warehouse picking routes.
+            Order filters (unfulfilled, partial, fulfilled, shipping) and
+            default sort/mode settings are managed on the{" "}
+            <s-link href="/app/admin/config">Configuration</s-link> page.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">By Product:</s-text> Groups items by product
-            name.
-          </s-paragraph>
-          <s-paragraph>
-            <s-text type="strong">By Quantity:</s-text> Prioritize high-volume
-            or low-volume items.
+            Bin locations determine sort order. Manage bins on the{" "}
+            <s-link href="/app/locations">Bin Locations</s-link> page.
           </s-paragraph>
         </s-stack>
       </s-section>

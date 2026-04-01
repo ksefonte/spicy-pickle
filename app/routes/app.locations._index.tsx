@@ -9,8 +9,35 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+/* ─── types shared between loader & component ─── */
+
+interface VariantInfo {
+  gid: string;
+  title: string;
+  productGid: string;
+  productTitle: string;
+}
+
+interface ProductGroup {
+  productGid: string;
+  productTitle: string;
+  variants: VariantInfo[];
+  allVariantsInBin: boolean;
+}
+
+interface BinWithGroups {
+  id: string;
+  name: string;
+  description: string | null;
+  sortOrder: number;
+  variantCount: number;
+  products: ProductGroup[];
+}
+
+/* ─── loader ─── */
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const shop = session.shop;
 
   await db.shop.upsert({
@@ -25,8 +52,117 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     orderBy: { sortOrder: "asc" },
   });
 
-  return { bins, shop };
+  const allGids = new Set<string>();
+  for (const bin of bins) {
+    for (const v of bin.variants) {
+      allGids.add(v.variantGid);
+    }
+  }
+
+  interface VariantNode {
+    id: string;
+    title: string;
+    product: { id: string; title: string; totalVariants: number };
+  }
+  interface NodesResponse {
+    nodes: Array<VariantNode | null>;
+  }
+
+  const variantMap = new Map<
+    string,
+    {
+      title: string;
+      productGid: string;
+      productTitle: string;
+      totalVariants: number;
+    }
+  >();
+
+  if (allGids.size > 0) {
+    const gidsArray = Array.from(allGids);
+    const BATCH_SIZE = 250;
+    for (let i = 0; i < gidsArray.length; i += BATCH_SIZE) {
+      const batch = gidsArray.slice(i, i + BATCH_SIZE);
+      const response = await admin.graphql(
+        `#graphql
+        query GetVariantInfo($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant {
+              id
+              title
+              product {
+                id
+                title
+                totalVariants: variantsCount { count }
+              }
+            }
+          }
+        }`,
+        { variables: { ids: batch } },
+      );
+      const data: NodesResponse = (await response.json()).data;
+      for (const node of data.nodes) {
+        if (!node) continue;
+        const totalVariants =
+          typeof node.product.totalVariants === "number"
+            ? node.product.totalVariants
+            : ((node.product.totalVariants as unknown as { count: number })
+                ?.count ?? 0);
+        variantMap.set(node.id, {
+          title: node.title,
+          productGid: node.product.id,
+          productTitle: node.product.title,
+          totalVariants,
+        });
+      }
+    }
+  }
+
+  const binsWithGroups: BinWithGroups[] = bins.map((bin) => {
+    const variantInfos: VariantInfo[] = bin.variants.map((v) => {
+      const info = variantMap.get(v.variantGid);
+      return {
+        gid: v.variantGid,
+        title: info?.title ?? v.variantGid,
+        productGid: info?.productGid ?? "unknown",
+        productTitle: info?.productTitle ?? "Unknown Product",
+      };
+    });
+
+    const byProduct = new Map<string, VariantInfo[]>();
+    for (const vi of variantInfos) {
+      const arr = byProduct.get(vi.productGid) ?? [];
+      arr.push(vi);
+      byProduct.set(vi.productGid, arr);
+    }
+
+    const products: ProductGroup[] = [];
+    for (const [productGid, variants] of byProduct) {
+      const info = variantMap.get(variants[0]?.gid ?? "");
+      const totalVariants = info?.totalVariants ?? 0;
+      products.push({
+        productGid,
+        productTitle: variants[0]?.productTitle ?? "Unknown Product",
+        variants: variants.sort((a, b) => a.title.localeCompare(b.title)),
+        allVariantsInBin: totalVariants > 0 && variants.length >= totalVariants,
+      });
+    }
+    products.sort((a, b) => a.productTitle.localeCompare(b.productTitle));
+
+    return {
+      id: bin.id,
+      name: bin.name,
+      description: bin.description,
+      sortOrder: bin.sortOrder,
+      variantCount: bin.variants.length,
+      products,
+    };
+  });
+
+  return { bins: binsWithGroups, shop };
 };
+
+/* ─── action ─── */
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
@@ -112,6 +248,37 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { removed: true };
   }
 
+  if (intent === "remove_product") {
+    const binId = formData.get("binId") as string;
+    const variantGids: string[] = JSON.parse(
+      formData.get("variantGids") as string,
+    );
+
+    await db.binVariant.deleteMany({
+      where: { binId, variantGid: { in: variantGids } },
+    });
+
+    return { removed: true };
+  }
+
+  if (intent === "move_variants") {
+    const targetBinId = formData.get("targetBinId") as string;
+    const variantGids: string[] = JSON.parse(
+      formData.get("variantGids") as string,
+    );
+
+    for (const variantGid of variantGids) {
+      await db.binVariant.deleteMany({
+        where: { shopId: shop, variantGid },
+      });
+      await db.binVariant.create({
+        data: { binId: targetBinId, shopId: shop, variantGid },
+      });
+    }
+
+    return { moved: true };
+  }
+
   if (intent === "reorder") {
     const order: Array<{ id: string; sortOrder: number }> = JSON.parse(
       formData.get("order") as string,
@@ -130,10 +297,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   return { error: "Unknown action" };
 };
 
-function shortenGid(gid: string): string {
-  const match = gid.match(/\/(\d+)$/);
-  return match ? `…${match[1]}` : gid;
-}
+/* ─── component ─── */
 
 export default function LocationsIndex() {
   const { bins } = useLoaderData<typeof loader>();
@@ -142,6 +306,11 @@ export default function LocationsIndex() {
   const [newBinOpen, setNewBinOpen] = useState(false);
   const [newBinName, setNewBinName] = useState("");
   const [newBinDescription, setNewBinDescription] = useState("");
+  const [movingItem, setMovingItem] = useState<{
+    sourceBinId: string;
+    variantGids: string[];
+    label: string;
+  } | null>(null);
 
   const handleCreateBin = () => {
     if (!newBinName.trim()) return;
@@ -183,16 +352,19 @@ export default function LocationsIndex() {
 
   const handleAddVariants = async (binId: string) => {
     const selected = await window.shopify.resourcePicker({
-      type: "variant",
+      type: "product",
       multiple: true,
+      selectionIds: [],
+      filter: { variants: true },
     });
     if (!selected || selected.length === 0) return;
-    const variantGids = selected
-      .map(
-        (s: { variants?: Array<{ id: string }>; id?: string }) =>
-          s.variants?.[0]?.id ?? s.id ?? "",
-      )
-      .filter(Boolean);
+
+    const variantGids: string[] = [];
+    for (const product of selected) {
+      for (const v of product.variants) {
+        if (v.id) variantGids.push(v.id);
+      }
+    }
     if (variantGids.length === 0) return;
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(
@@ -211,6 +383,47 @@ export default function LocationsIndex() {
       { intent: "remove_variant", binId, variantGid },
       { method: "POST" },
     );
+  };
+
+  const handleRemoveProduct = (binId: string, group: ProductGroup) => {
+    if (
+      !confirm(
+        `Remove all ${group.variants.length} variant(s) of "${group.productTitle}" from this bin?`,
+      )
+    )
+      return;
+    const gids = group.variants.map((v) => v.gid);
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "remove_product",
+        binId,
+        variantGids: JSON.stringify(gids),
+      },
+      { method: "POST" },
+    );
+  };
+
+  const handleStartMove = (
+    sourceBinId: string,
+    variantGids: string[],
+    label: string,
+  ) => {
+    setMovingItem({ sourceBinId, variantGids, label });
+  };
+
+  const handleConfirmMove = (targetBinId: string) => {
+    if (!movingItem) return;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    fetcher.submit(
+      {
+        intent: "move_variants",
+        targetBinId,
+        variantGids: JSON.stringify(movingItem.variantGids),
+      },
+      { method: "POST" },
+    );
+    setMovingItem(null);
   };
 
   const handleMoveUp = (index: number) => {
@@ -250,6 +463,62 @@ export default function LocationsIndex() {
       <s-button slot="primary-action" onClick={() => setNewBinOpen(true)}>
         + New Bin
       </s-button>
+
+      {/* Move-to-bin modal */}
+      {movingItem && (
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.4)",
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={() => setMovingItem(null)}
+        >
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            role="dialog"
+            aria-label={`Move ${movingItem.label}`}
+            style={{
+              background: "var(--p-color-bg-surface, #fff)",
+              borderRadius: "12px",
+              padding: "20px",
+              minWidth: "320px",
+              maxWidth: "400px",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.2)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setMovingItem(null);
+            }}
+          >
+            <s-stack direction="block" gap="base">
+              <s-heading>Move {movingItem.label}</s-heading>
+              <s-text tone="neutral">Select destination bin:</s-text>
+              <s-stack direction="block" gap="small">
+                {bins
+                  .filter((b) => b.id !== movingItem.sourceBinId)
+                  .map((b) => (
+                    <s-button
+                      key={b.id}
+                      variant="secondary"
+                      onClick={() => handleConfirmMove(b.id)}
+                    >
+                      {b.name}
+                    </s-button>
+                  ))}
+              </s-stack>
+              <s-button variant="tertiary" onClick={() => setMovingItem(null)}>
+                Cancel
+              </s-button>
+            </s-stack>
+          </div>
+        </div>
+      )}
 
       <s-section heading="Warehouse Bins">
         <s-stack direction="block" gap="base">
@@ -369,48 +638,188 @@ export default function LocationsIndex() {
                         )}
                       </s-stack>
                       <s-text tone="neutral">
-                        {bin.variants.length} SKU
-                        {bin.variants.length !== 1 ? "s" : ""}
+                        {bin.products.length} product
+                        {bin.products.length !== 1 ? "s" : ""},{" "}
+                        {bin.variantCount} SKU
+                        {bin.variantCount !== 1 ? "s" : ""}
                       </s-text>
                     </s-stack>
 
-                    {/* Variant list */}
-                    {bin.variants.length > 0 && (
+                    {/* Product groups */}
+                    {bin.products.length > 0 && (
                       <div style={{ paddingLeft: "32px" }}>
-                        {bin.variants.map((v, vi) => (
+                        {bin.products.map((group, gi) => (
                           <div
-                            key={v.id}
+                            key={group.productGid}
                             style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "center",
-                              padding: "4px 0",
                               borderBottom:
-                                vi < bin.variants.length - 1
-                                  ? "1px solid var(--p-color-border-subdued)"
+                                gi < bin.products.length - 1
+                                  ? "1px solid var(--p-color-border-subdued, #e1e3e5)"
                                   : "none",
+                              padding: "6px 0",
                             }}
                           >
-                            <s-text tone="neutral">
-                              {vi < bin.variants.length - 1 ? "├" : "└"}{" "}
-                              {shortenGid(v.variantGid)}
-                            </s-text>
-                            <button
-                              onClick={() =>
-                                handleRemoveVariant(bin.id, v.variantGid)
-                              }
-                              title="Remove variant"
+                            <div
                               style={{
-                                background: "none",
-                                border: "none",
-                                cursor: "pointer",
-                                color: "var(--p-color-text-critical)",
-                                fontSize: "14px",
-                                padding: "2px 6px",
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
                               }}
                             >
-                              ✕
-                            </button>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                  flex: 1,
+                                  minWidth: 0,
+                                }}
+                              >
+                                <s-text type="strong">
+                                  {group.productTitle}
+                                </s-text>
+                                {group.allVariantsInBin ? (
+                                  <span
+                                    style={{
+                                      fontSize: "11px",
+                                      color:
+                                        "var(--p-color-text-success, #008060)",
+                                      background:
+                                        "var(--p-color-bg-success-subdued, #f1f8f5)",
+                                      padding: "1px 6px",
+                                      borderRadius: "4px",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    All variants
+                                  </span>
+                                ) : (
+                                  <span
+                                    style={{
+                                      fontSize: "11px",
+                                      color:
+                                        "var(--p-color-text-subdued, #6d7175)",
+                                      whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    {group.variants.length} variant
+                                    {group.variants.length !== 1 ? "s" : ""}
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "4px",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                <button
+                                  onClick={() =>
+                                    handleStartMove(
+                                      bin.id,
+                                      group.variants.map((v) => v.gid),
+                                      group.productTitle,
+                                    )
+                                  }
+                                  title={`Move ${group.productTitle} to another bin`}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    color:
+                                      "var(--p-color-text-secondary, #6d7175)",
+                                    fontSize: "12px",
+                                    padding: "2px 6px",
+                                  }}
+                                >
+                                  Move
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleRemoveProduct(bin.id, group)
+                                  }
+                                  title={`Remove ${group.productTitle}`}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    color:
+                                      "var(--p-color-text-critical, #d72c0d)",
+                                    fontSize: "12px",
+                                    padding: "2px 6px",
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Only show individual variants when NOT all variants are in this bin */}
+                            {!group.allVariantsInBin && (
+                              <div
+                                style={{
+                                  paddingLeft: "16px",
+                                  marginTop: "2px",
+                                }}
+                              >
+                                {group.variants.map((v) => (
+                                  <div
+                                    key={v.gid}
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      padding: "2px 0",
+                                    }}
+                                  >
+                                    <s-text tone="neutral">{v.title}</s-text>
+                                    <div
+                                      style={{ display: "flex", gap: "4px" }}
+                                    >
+                                      <button
+                                        onClick={() =>
+                                          handleStartMove(
+                                            bin.id,
+                                            [v.gid],
+                                            `${group.productTitle} — ${v.title}`,
+                                          )
+                                        }
+                                        title={`Move ${v.title} to another bin`}
+                                        style={{
+                                          background: "none",
+                                          border: "none",
+                                          cursor: "pointer",
+                                          color:
+                                            "var(--p-color-text-secondary, #6d7175)",
+                                          fontSize: "11px",
+                                          padding: "1px 4px",
+                                        }}
+                                      >
+                                        Move
+                                      </button>
+                                      <button
+                                        onClick={() =>
+                                          handleRemoveVariant(bin.id, v.gid)
+                                        }
+                                        title={`Remove ${v.title}`}
+                                        style={{
+                                          background: "none",
+                                          border: "none",
+                                          cursor: "pointer",
+                                          color:
+                                            "var(--p-color-text-critical, #d72c0d)",
+                                          fontSize: "11px",
+                                          padding: "1px 4px",
+                                        }}
+                                      >
+                                        ✕
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -429,7 +838,7 @@ export default function LocationsIndex() {
                           handleAddVariants(bin.id);
                         }}
                       >
-                        + Add Variants
+                        + Add Products
                       </s-button>
                       <s-button
                         variant="tertiary"
@@ -470,14 +879,25 @@ export default function LocationsIndex() {
             Each variant can only belong to one bin at a time. Adding a variant
             to a new bin automatically removes it from its previous bin.
           </s-paragraph>
+          <s-paragraph>
+            Products where all variants are in the same bin are shown condensed.
+            Products with variants spread across bins show each variant
+            individually for clarity.
+          </s-paragraph>
         </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Reordering">
-        <s-paragraph>
-          Use the ▲▼ arrows to reorder bins. The pick list will follow this
-          order so you can match your warehouse walk path.
-        </s-paragraph>
+      <s-section slot="aside" heading="Reordering &amp; Moving">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Use the ▲▼ arrows to reorder bins. The pick list will follow this
+            order so you can match your warehouse walk path.
+          </s-paragraph>
+          <s-paragraph>
+            Use the Move button on any product or variant to transfer it to a
+            different bin.
+          </s-paragraph>
+        </s-stack>
       </s-section>
     </s-page>
   );

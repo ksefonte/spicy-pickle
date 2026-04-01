@@ -173,6 +173,8 @@ async function createProductRelationship(
 
 /**
  * Adds a single product_relationship to a variant (appends to existing list).
+ * If a metaobject already exists with the same child, it is updated in-place
+ * rather than creating a duplicate.
  */
 export async function addSingleRelationship(
   admin: AdminApiContext,
@@ -180,12 +182,19 @@ export async function addSingleRelationship(
   childGid: string,
   quantity: number,
 ): Promise<string> {
+  const existing = await getExistingAttachments(admin, variantGid);
+
+  const match = await findExistingMetaobjectForChild(admin, existing, childGid);
+  if (match) {
+    await updateMetaobjectQuantity(admin, match, quantity);
+    return match;
+  }
+
   const metaobjectGid = await createProductRelationship(
     admin,
     childGid,
     quantity,
   );
-  const existing = await getExistingAttachments(admin, variantGid);
   await setVariantRelationships(admin, variantGid, [
     ...existing,
     metaobjectGid,
@@ -416,6 +425,84 @@ async function deleteVariantMetaobjects(
   if (existingGids.length > 0) {
     await setVariantRelationships(admin, variantGid, []);
   }
+}
+
+/**
+ * Resolves a list of metaobject GIDs to find one whose child field matches
+ * the given childGid. Returns the metaobject GID if found, null otherwise.
+ */
+async function findExistingMetaobjectForChild(
+  admin: AdminApiContext,
+  metaobjectGids: string[],
+  childGid: string,
+): Promise<string | null> {
+  if (metaobjectGids.length === 0) return null;
+  const fieldMap = await getMetaobjectFieldMap(admin);
+
+  const response = await admin.graphql(
+    `#graphql
+      query ResolveMetaobjects($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on Metaobject {
+            id
+            fields {
+              key
+              value
+            }
+          }
+        }
+      }
+    `,
+    { variables: { ids: metaobjectGids } },
+  );
+
+  const data = (await response.json()) as {
+    data?: {
+      nodes?: Array<{
+        id: string;
+        fields?: Array<{ key: string; value: string }>;
+      } | null>;
+    };
+  };
+
+  for (const node of data.data?.nodes ?? []) {
+    if (!node?.fields) continue;
+    const childField = node.fields.find((f) => f.key === fieldMap.childKey);
+    if (childField?.value === childGid) {
+      return node.id;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Updates the quantity field of an existing product_relationship metaobject.
+ */
+async function updateMetaobjectQuantity(
+  admin: AdminApiContext,
+  metaobjectGid: string,
+  quantity: number,
+): Promise<void> {
+  const fieldMap = await getMetaobjectFieldMap(admin);
+
+  await admin.graphql(
+    `#graphql
+      mutation UpdateMetaobject($id: ID!, $metaobject: MetaobjectUpdateInput!) {
+        metaobjectUpdate(id: $id, metaobject: $metaobject) {
+          userErrors { field message }
+        }
+      }
+    `,
+    {
+      variables: {
+        id: metaobjectGid,
+        metaobject: {
+          fields: [{ key: fieldMap.quantityKey, value: String(quantity) }],
+        },
+      },
+    },
+  );
 }
 
 // ============================================================================
