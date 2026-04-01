@@ -3,8 +3,8 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
-import { useState } from "react";
+import { useLoaderData, useFetcher, useSearchParams } from "react-router";
+import { useState, useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
@@ -31,6 +31,46 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     create: { id: session.shop },
   });
 
+  const url = new URL(request.url);
+
+  let preloadedOrderIds: string[] | null = null;
+
+  // Admin link extensions append ids[] params with numeric order IDs
+  const idsParams = url.searchParams.getAll("ids[]");
+  if (idsParams.length > 0) {
+    preloadedOrderIds = idsParams
+      .filter(Boolean)
+      .map((id) => `gid://shopify/Order/${id}`);
+  }
+
+  // Also support comma-separated format from direct URL
+  if (!preloadedOrderIds) {
+    const ordersParam = url.searchParams.get("orders");
+    if (ordersParam) {
+      preloadedOrderIds = ordersParam
+        .split(",")
+        .filter(Boolean)
+        .map((id) => `gid://shopify/Order/${id}`);
+    }
+  }
+
+  if (!preloadedOrderIds) {
+    const picklistSessionId = url.searchParams.get("session");
+    if (picklistSessionId) {
+      const picklistSession = await db.pickListSession.findUnique({
+        where: { id: picklistSessionId },
+      });
+      if (picklistSession && picklistSession.shopId === session.shop) {
+        try {
+          preloadedOrderIds = JSON.parse(picklistSession.orderIds) as string[];
+        } catch {
+          // ignore corrupted session
+        }
+        await db.pickListSession.delete({ where: { id: picklistSessionId } });
+      }
+    }
+  }
+
   const today = new Date();
   const thirtyDaysAgo = new Date(today);
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -46,6 +86,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       mode: shop.picklistMode as "standard" | "resolved",
       sortBy: shop.picklistSortBy as SortField,
       sortDir: shop.picklistSortDir as SortDirection,
+    },
+    preloadedOrderIds,
+    autoGenerate: url.searchParams.get("auto") === "true",
+    urlOverrides: {
+      mode: url.searchParams.get("mode") as "standard" | "resolved" | null,
+      unfulfilled: url.searchParams.get("unfulfilled"),
+      partial: url.searchParams.get("partial"),
+      fulfilled: url.searchParams.get("fulfilled"),
+      shippingOnly: url.searchParams.get("shippingOnly"),
     },
   };
 };
@@ -86,15 +135,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { error: "Please select at least one order status" } as ActionData;
     }
 
+    const orderIdsJson = formData.get("orderIds") as string | null;
+    let orderIds: string[] | undefined;
+    if (orderIdsJson) {
+      try {
+        orderIds = JSON.parse(orderIdsJson) as string[];
+      } catch {
+        // ignore parse error, fall through to date range
+      }
+    }
+
     try {
       const pickList = await generatePickList(
         admin,
         {
           shop,
-          startDate: startDateStr ? new Date(startDateStr) : undefined,
-          endDate: endDateStr ? new Date(endDateStr) : undefined,
+          startDate: orderIds
+            ? undefined
+            : startDateStr
+              ? new Date(startDateStr)
+              : undefined,
+          endDate: orderIds
+            ? undefined
+            : endDateStr
+              ? new Date(endDateStr)
+              : undefined,
           statuses,
           requiresShipping,
+          orderIds,
         },
         sortBy,
         sortDirection,
@@ -129,9 +197,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function PickListIndex() {
-  const { defaultStartDate, defaultEndDate, defaults } =
-    useLoaderData<typeof loader>();
+  const {
+    defaultStartDate,
+    defaultEndDate,
+    defaults,
+    preloadedOrderIds,
+    autoGenerate,
+    urlOverrides,
+  } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [startDate, setStartDate] = useState(defaultStartDate);
   const [endDate, setEndDate] = useState(defaultEndDate);
@@ -140,6 +215,10 @@ export default function PickListIndex() {
     defaults.sortDir,
   );
   const [mode, setMode] = useState<"standard" | "resolved">(defaults.mode);
+  const [orderIdsFromExtension] = useState<string[] | null>(
+    preloadedOrderIds ?? null,
+  );
+  const autoTriggered = useRef(false);
 
   const isLoading =
     fetcher.state === "submitting" || fetcher.state === "loading";
@@ -147,20 +226,72 @@ export default function PickListIndex() {
   const error = fetcher.data?.error;
   const csv = fetcher.data?.csv;
 
-  const handleGenerate = () => {
+  const submitGenerate = (
+    orderIds?: string[] | null,
+    overrides?: typeof urlOverrides,
+  ) => {
+    const useUnfulfilled =
+      overrides?.unfulfilled != null
+        ? overrides.unfulfilled === "true"
+        : defaults.unfulfilled;
+    const usePartial =
+      overrides?.partial != null
+        ? overrides.partial === "true"
+        : defaults.partial;
+    const useFulfilled =
+      overrides?.fulfilled != null
+        ? overrides.fulfilled === "true"
+        : defaults.fulfilled;
+    const useShipping =
+      overrides?.shippingOnly != null
+        ? overrides.shippingOnly === "true"
+        : defaults.shippingOnly;
+    const useMode = overrides?.mode ?? mode;
+
     const formData = new FormData();
     formData.set("intent", "generate");
     formData.set("startDate", startDate ?? "");
     formData.set("endDate", endDate ?? "");
-    formData.set("unfulfilled", String(defaults.unfulfilled));
-    formData.set("partial", String(defaults.partial));
-    formData.set("fulfilled", String(defaults.fulfilled));
+    formData.set("unfulfilled", String(useUnfulfilled));
+    formData.set("partial", String(usePartial));
+    formData.set("fulfilled", String(useFulfilled));
     formData.set("sortBy", sortBy);
     formData.set("sortDirection", sortDirection);
-    formData.set("mode", mode);
-    formData.set("requiresShipping", String(defaults.shippingOnly));
+    formData.set("mode", useMode);
+    formData.set("requiresShipping", String(useShipping));
+    if (orderIds && orderIds.length > 0) {
+      formData.set("orderIds", JSON.stringify(orderIds));
+    }
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     fetcher.submit(formData, { method: "POST" });
+  };
+
+  useEffect(() => {
+    if (autoTriggered.current) return;
+    if (orderIdsFromExtension && orderIdsFromExtension.length > 0) {
+      autoTriggered.current = true;
+      submitGenerate(orderIdsFromExtension, urlOverrides);
+      const params = new URLSearchParams(searchParams);
+      params.delete("session");
+      params.delete("orders");
+      params.delete("ids[]");
+      setSearchParams(params, { replace: true });
+    } else if (autoGenerate) {
+      autoTriggered.current = true;
+      submitGenerate(null, urlOverrides);
+      const params = new URLSearchParams(searchParams);
+      params.delete("auto");
+      params.delete("mode");
+      params.delete("unfulfilled");
+      params.delete("partial");
+      params.delete("fulfilled");
+      params.delete("shippingOnly");
+      setSearchParams(params, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleGenerate = () => {
+    submitGenerate(orderIdsFromExtension);
   };
 
   const handleExport = () => {
@@ -333,6 +464,19 @@ export default function PickListIndex() {
               Change defaults
             </a>
           </s-text>
+
+          {orderIdsFromExtension && orderIdsFromExtension.length > 0 && (
+            <s-box padding="base" borderRadius="base" background="subdued">
+              <s-text>
+                Generating from{" "}
+                <strong>
+                  {orderIdsFromExtension.length} selected order
+                  {orderIdsFromExtension.length !== 1 ? "s" : ""}
+                </strong>{" "}
+                (via Shopify Orders page).
+              </s-text>
+            </s-box>
+          )}
 
           <s-button onClick={handleGenerate} disabled={isLoading}>
             {isLoading ? "Generating..." : "Generate Pick List"}

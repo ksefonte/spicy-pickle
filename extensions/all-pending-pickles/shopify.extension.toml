@@ -1,0 +1,9 @@
+[[extensions]]
+name = "All Pending Spicy Pickles"
+handle = "all-pending-pickles"
+uid = "dceef395-f9a4-dc2d-402c-acbeda76a1fd41af8295"
+type = "admin_link"
+
+  [[extensions.targeting]]
+  target = "admin.order-index.action.link"
+  url = "/app/picklist?auto=true&mode=resolved&unfulfilled=true&partial=false&fulfilled=false"

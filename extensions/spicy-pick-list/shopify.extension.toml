@@ -1,0 +1,9 @@
+[[extensions]]
+name = "Spicy Pick List"
+handle = "spicy-pick-list"
+uid = "edd4957a-6f09-365a-a0f0-0718724b4e561bbdea2f"
+type = "admin_link"
+
+  [[extensions.targeting]]
+  target = "admin.order-index.selection-action.link"
+  url = "/app/picklist"

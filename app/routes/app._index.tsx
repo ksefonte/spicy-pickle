@@ -1,8 +1,12 @@
-import type { LoaderFunctionArgs } from "react-router";
-import { redirect } from "react-router";
-import { authenticate } from "../shopify.server";
+import { useEffect } from "react";
+import { useNavigate } from "react-router";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return redirect("/app/picklist");
-};
+export default function AppIndex() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    void navigate("/app/picklist", { replace: true });
+  }, [navigate]);
+
+  return null;
+}

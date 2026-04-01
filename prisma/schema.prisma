@@ -149,6 +149,19 @@ model MigrationScanCache {
   countsJson  String   // JSON-serialised Record<string, number>
 }
 
+/// Short-lived session for passing order IDs from admin extensions to the Pick List page.
+/// Extensions POST order GIDs here, receive a session ID, then navigate to the app.
+/// Sessions are cleaned up after 1 hour.
+model PickListSession {
+  id        String   @id @default(cuid())
+  shopId    String
+  orderIds  String   // JSON array of order GIDs
+  createdAt DateTime @default(now())
+
+  @@index([shopId])
+  @@index([createdAt])
+}
+
 /// Supplier SKU mapping for inventory cost tracking
 /// Maps Shopify variants to supplier SKUs with quantity ratios
 model SupplierSku {

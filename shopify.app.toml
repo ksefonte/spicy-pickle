@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "109e82bde293da48ccecb6f05cd99ef3"
-name = "spicy-pickle"
+name = "Spicy Pickle"
 application_url = "https://spicy-pickle-990586804218.australia-southeast1.run.app"
 embedded = true
 
