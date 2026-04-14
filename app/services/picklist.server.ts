@@ -49,13 +49,15 @@ export interface OrderSummary {
   }>;
 }
 
+export type PickListMode = "resolved" | "no-expand" | "configured";
+
 export interface PickListResult {
   items: PickListItem[];
   orderCount: number;
   totalItems: number;
   generatedAt: Date;
   orders: OrderSummary[];
-  mode: "standard" | "resolved";
+  mode: PickListMode;
 }
 
 export type SortField = "bin" | "product" | "quantity";
@@ -120,7 +122,7 @@ export async function generatePickList(
   filters: PickListFilters,
   sortBy: SortField = "bin",
   sortDirection: SortDirection = "asc",
-  mode: "standard" | "resolved" = "standard",
+  mode: PickListMode = "resolved",
 ): Promise<PickListResult> {
   const { orders, lineItems, orderSummaries } = await fetchOrdersWithSummaries(
     admin,
@@ -306,15 +308,18 @@ async function fetchOrdersWithSummaries(
 
 /**
  * Expands bundles to their component variants.
- * In "standard" mode, only bundles with expandOnPick=true are expanded.
- * In "resolved" mode, ALL bundles are expanded.
+ * - "resolved": All bundles with children are expanded.
+ * - "no-expand": No expansion; every variant appears as ordered.
+ * - "configured": Only bundles with expandOnPick=true are expanded.
  */
 async function expandBundles(
   admin: AdminApiContext,
   shop: string,
   lineItems: OrderLineItem[],
-  mode: "standard" | "resolved" = "standard",
+  mode: PickListMode = "resolved",
 ): Promise<OrderLineItem[]> {
+  if (mode === "no-expand") return lineItems;
+
   const result: OrderLineItem[] = [];
 
   const variantGids = [...new Set(lineItems.map((item) => item.variantGid))];

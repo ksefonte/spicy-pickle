@@ -55,7 +55,7 @@ model Shop {
   picklistPartial      Boolean       @default(true)
   picklistFulfilled    Boolean       @default(false)
   picklistShippingOnly Boolean       @default(true)
-  picklistMode         String        @default("standard") // "standard" | "resolved"
+  picklistMode         String        @default("resolved") // "resolved" | "no-expand" | "configured"
   picklistSortBy       String        @default("bin")      // "bin" | "product" | "quantity"
   picklistSortDir      String        @default("asc")      // "asc" | "desc"
 

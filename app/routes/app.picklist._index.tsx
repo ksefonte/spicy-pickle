@@ -12,6 +12,7 @@ import {
   generatePickList,
   exportToCSV,
   type PickListResult,
+  type PickListMode,
   type SortField,
   type SortDirection,
 } from "../services/picklist.server";
@@ -83,14 +84,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       partial: shop.picklistPartial,
       fulfilled: shop.picklistFulfilled,
       shippingOnly: shop.picklistShippingOnly,
-      mode: shop.picklistMode as "standard" | "resolved",
+      mode: shop.picklistMode as PickListMode,
       sortBy: shop.picklistSortBy as SortField,
       sortDir: shop.picklistSortDir as SortDirection,
     },
     preloadedOrderIds,
     autoGenerate: url.searchParams.get("auto") === "true",
     urlOverrides: {
-      mode: url.searchParams.get("mode") as "standard" | "resolved" | null,
+      mode: url.searchParams.get("mode") as PickListMode | null,
       unfulfilled: url.searchParams.get("unfulfilled"),
       partial: url.searchParams.get("partial"),
       fulfilled: url.searchParams.get("fulfilled"),
@@ -115,8 +116,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const sortBy = (formData.get("sortBy") as SortField) ?? "bin";
     const sortDirection =
       (formData.get("sortDirection") as SortDirection) ?? "asc";
-    const mode =
-      (formData.get("mode") as "standard" | "resolved") ?? "standard";
+    const mode = (formData.get("mode") as PickListMode) ?? "resolved";
     const requiresShippingStr = formData.get("requiresShipping");
     const requiresShipping =
       requiresShippingStr === "true"
@@ -214,7 +214,7 @@ export default function PickListIndex() {
   const [sortDirection, setSortDirection] = useState<SortDirection>(
     defaults.sortDir,
   );
-  const [mode, setMode] = useState<"standard" | "resolved">(defaults.mode);
+  const [mode, setMode] = useState<PickListMode>(defaults.mode);
   const [orderIdsFromExtension] = useState<string[] | null>(
     preloadedOrderIds ?? null,
   );
@@ -384,9 +384,7 @@ export default function PickListIndex() {
               <select
                 id="picklist-mode"
                 value={mode}
-                onChange={(e) =>
-                  setMode(e.target.value as "standard" | "resolved")
-                }
+                onChange={(e) => setMode(e.target.value as PickListMode)}
                 style={{
                   padding: "8px 12px",
                   border: "1px solid var(--p-color-border)",
@@ -394,8 +392,9 @@ export default function PickListIndex() {
                   fontSize: "14px",
                 }}
               >
-                <option value="standard">Standard</option>
-                <option value="resolved">Base Unit Resolution</option>
+                <option value="resolved">Resolved</option>
+                <option value="no-expand">No Expand</option>
+                <option value="configured">Expand Configured-only</option>
               </select>
             </div>
             <div>
@@ -504,7 +503,9 @@ export default function PickListIndex() {
                 unique item
                 {pickList.items.length !== 1 ? "s" : ""} • {pickList.totalItems}{" "}
                 total units
-                {pickList.mode === "resolved" ? " • Resolved mode" : ""}
+                {pickList.mode !== "resolved"
+                  ? ` • ${pickList.mode === "no-expand" ? "No Expand" : "Configured-only"}`
+                  : ""}
               </s-paragraph>
               <s-stack direction="inline" gap="small">
                 <s-button variant="secondary" onClick={handleExport}>
@@ -650,13 +651,17 @@ export default function PickListIndex() {
             available inventory counts.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Standard mode:</s-text> Expands bundles with
-            product relationships into their base components so you pick single
-            units. Variants without relationships appear as-is.
+            <s-text type="strong">Resolved</s-text> (default): Expands all
+            bundles with children to their base unit components.
           </s-paragraph>
           <s-paragraph>
-            <s-text type="strong">Resolved mode:</s-text> Expands ALL bundles to
-            base components for a fully resolved pick list.
+            <s-text type="strong">No Expand:</s-text> Every variant appears
+            exactly as ordered — no bundle expansion.
+          </s-paragraph>
+          <s-paragraph>
+            <s-text type="strong">Expand Configured-only:</s-text> Only expands
+            bundles that have &quot;expand on pick&quot; enabled. All other
+            variants appear as-is.
           </s-paragraph>
         </s-stack>
       </s-section>

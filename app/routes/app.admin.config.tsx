@@ -100,7 +100,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         picklistPartial: formData.get("picklistPartial") === "true",
         picklistFulfilled: formData.get("picklistFulfilled") === "true",
         picklistShippingOnly: formData.get("picklistShippingOnly") === "true",
-        picklistMode: (formData.get("picklistMode") as string) || "standard",
+        picklistMode: (formData.get("picklistMode") as string) || "resolved",
         picklistSortBy: (formData.get("picklistSortBy") as string) || "bin",
         picklistSortDir: (formData.get("picklistSortDir") as string) || "asc",
       },
@@ -642,8 +642,9 @@ function PickListDefaults({
               onChange={(e) => setMode(e.target.value)}
               style={selectStyle}
             >
-              <option value="standard">Standard</option>
-              <option value="resolved">Base Unit Resolution</option>
+              <option value="resolved">Resolved</option>
+              <option value="no-expand">No Expand</option>
+              <option value="configured">Expand Configured-only</option>
             </select>
           </div>
           <div>
